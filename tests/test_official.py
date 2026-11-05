@@ -160,7 +160,8 @@ def main():
         subprocess.run(['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fPIC',
                         '-shared', str(args.source.resolve() / 'cpa-updater.c'),
                         '-o', str(library)], check=True)
-        cmd = ['bwrap', '--unshare-all', '--die-with-parent', '--ro-bind', '/usr', '/usr',
+        isolation = ['--unshare-pid', '--unshare-net', '--unshare-ipc', '--unshare-uts'] if os.geteuid() == 0 else ['--unshare-all']
+        cmd = ['bwrap', *isolation, '--die-with-parent', '--ro-bind', '/usr', '/usr',
                '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/sbin', '/sbin',
                '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
                '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--tmpfs', '/var',

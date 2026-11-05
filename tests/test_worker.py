@@ -86,7 +86,10 @@ def build_fixtures():
     return f,m
 
 def sandbox_args(f,m):
-    cmd=['bwrap','--unshare-all','--die-with-parent','--ro-bind','/usr','/usr',
+    # Root CI already has mount privileges; avoid a one-UID user namespace
+    # losing access to runner-owned parent directories. Filesystem/network stay isolated.
+    isolation = ['--unshare-pid','--unshare-net','--unshare-ipc','--unshare-uts'] if os.geteuid() == 0 else ['--unshare-all']
+    cmd=['bwrap',*isolation,'--die-with-parent','--ro-bind','/usr','/usr',
          '--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin',
          '--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
          '--proc','/proc','--dev','/dev','--tmpfs','/tmp','--tmpfs','/var',
