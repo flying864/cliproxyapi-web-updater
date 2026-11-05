@@ -1,0 +1,2 @@
+# Preserve the vendored upstream jsmn header byte-for-byte, including whitespace.
+jsmn.h -whitespace
