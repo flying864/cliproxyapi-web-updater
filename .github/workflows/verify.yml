@@ -1,43 +1,16 @@
 name: verify
-
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: verify-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  linux-amd64:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install test-only dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc python3 curl bubblewrap
-      - name: Syntax and isolated plugin tests
-        run: |
-          for script in install.sh uninstall.sh cliproxy-updater-worker; do
-            bash -n "$script" || exit
-          done
-          python3 test_plugin.py
-          python3 tests/test_sanitizer.py
-      - name: Isolated worker and installer regression tests
-        run: |
-          # Root is only used on an ephemeral runner so user-namespace policy
-          # cannot silently skip tests. The tests themselves require bwrap.
-          sudo python3 tests/test_worker.py
-          sudo python3 tests/test_install.py
-      - name: Pinned official CLIProxyAPI integration
-        run: |
-          mkdir -p test-output
-          python3 tests/fetch_official.py --output test-output/cli-proxy-api
-          sudo python3 tests/test_official.py --binary test-output/cli-proxy-api --output test-output/official
+  verify:
+    uses: ./.github/workflows/verify-core.yml
+  build:
+    uses: ./.github/workflows/build-store.yml

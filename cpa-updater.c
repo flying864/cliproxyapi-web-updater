@@ -206,7 +206,7 @@ static int queue_job(cliproxy_buffer *r,const char *action,const char *expected)
 static int plugin_call(char *method,uint8_t *req,size_t len,cliproxy_buffer *response){
   response->ptr=NULL;response->len=0;
   if(!strcmp(method,"plugin.register")||!strcmp(method,"plugin.reconfigure"))
-    return respond(response,"{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{\"Name\":\"CPA Web Updater\",\"Version\":\"0.3.0\",\"Author\":\"Local deployment\",\"GitHubRepository\":\"https://github.com/flying864/cliproxyapi-web-updater\",\"Logo\":\"\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}}");
+    return respond(response,"{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{\"Name\":\"CPA Web Updater\",\"Version\":\"0.4.0\",\"Author\":\"Local deployment\",\"GitHubRepository\":\"https://github.com/flying864/cliproxyapi-web-updater\",\"Logo\":\"\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}}");
   if(!strcmp(method,"management.register"))
     return respond(response,"{\"ok\":true,\"result\":{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/cpa-updater/status\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/check\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/update\"}],\"resources\":[{\"Path\":\"/panel\",\"Menu\":\"CPA 一键更新\",\"Description\":\"检查版本、安装更新和回滚\"}]}}");
   if(strcmp(method,"management.handle"))return respond(response,"{\"ok\":false,\"error\":{\"code\":\"unknown_method\",\"message\":\"Unknown plugin method\"}}");

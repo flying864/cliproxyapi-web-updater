@@ -68,7 +68,7 @@ class Regression(unittest.TestCase):
     def test_metadata(self):
         m = self.invoke('plugin.register')['result']['metadata']
         self.assertEqual(m['GitHubRepository'], 'https://github.com/flying864/cliproxyapi-web-updater')
-        self.assertEqual(m['Version'], '0.3.0')
+        self.assertEqual(m['Version'], '0.4.0')
         self.assertEqual(self.p.abi_version, 1)
 
     def test_full_routes(self):

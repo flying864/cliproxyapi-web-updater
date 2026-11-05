@@ -1,0 +1,52 @@
+name: Full isolated verification
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        type: string
+        required: false
+        default: ''
+permissions:
+  contents: read
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install test-only dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc python3 curl bubblewrap
+      - name: Version, registry and store regressions
+        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "$RELEASE_TAG" ]]; then args=(--tag "$RELEASE_TAG"); fi
+          python3 -B scripts/check_release_version.py "${args[@]}"
+          python3 -B scripts/validate_registry.py
+          python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
+      - name: Syntax, ABI and sanitizer tests
+        run: |
+          set -euo pipefail
+          for script in install.sh uninstall.sh cliproxy-updater-worker apply_to_repo.sh; do
+            bash -n "$script"
+          done
+          python3 -B test_plugin.py
+          python3 -B tests/test_sanitizer.py
+      - name: Isolated worker and installer regressions
+        run: |
+          sudo python3 -B tests/test_worker.py
+          sudo python3 -B tests/test_install.py
+      - name: Pinned official host integration
+        run: |
+          mkdir -p test-output
+          python3 -B tests/fetch_official.py --output test-output/cli-proxy-api
+          sudo python3 -B tests/test_official.py --binary test-output/cli-proxy-api --output test-output/official

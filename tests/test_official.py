@@ -92,7 +92,7 @@ plugins:
             plugin = plugins[0]
             assert plugin['registered'] is True and plugin['effective_enabled'] is True, plugin
             assert plugin['metadata']['github_repository'] == REPO, plugin
-            assert plugin['metadata']['version'] == '0.3.0', plugin
+            assert plugin['metadata']['version'] == '0.4.0', plugin
             panel = request('/v0/resource/plugins/cpa-updater/panel', auth=False)
             assert panel['status'] == 200 and panel['body']['html'], panel
             api = '/v0/management/plugins/cpa-updater'

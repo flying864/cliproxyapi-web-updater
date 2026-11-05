@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Add official-store schema v1 registry and native amd64/arm64 ZIP packaging.
+- Require full verification of the exact tag commit before publishing; reuse main CI and pin Actions commits.
+- Validate the final production library ABI before packaging and read back published asset bytes.
+- Include the official-host test in complete version checks; reject numeric-prefix/suffix mismatches.
+- Correct read-only permission-bit checks and reject nonregular ZIP entries.
+- Guard legacy overlay application against conflicts and ordinary partial-write failures.
+- Preserve root worker and host permission boundaries; store publication is not a one-click host installer.
+
 ## 0.3.0
 
 - Fix official plugin registration metadata and full management routes; use the project GitHub repository.

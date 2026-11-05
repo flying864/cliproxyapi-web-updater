@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CPA Web Updater v0.3.0: fixed, verified official stable releases only.
+# CPA Web Updater v0.4.0: fixed, verified official stable releases only.
 # Runs as root in its own systemd oneshot; never executes arbitrary plugin input.
 set -Eeuo pipefail
 umask 077

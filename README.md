@@ -1,8 +1,12 @@
-# CPA Web Updater v0.3.0
+# CPA Web Updater v0.4.0
 
 为原生 systemd 部署的 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 提供：**检查正式版 → 确认版本 → 更新 → 失败恢复旧二进制**。
 
 源码与反馈：[flying864/cliproxyapi-web-updater](https://github.com/flying864/cliproxyapi-web-updater)。第三方插件，未上架官方插件商店。
+
+## 商店发布支持
+
+本版本增加商店 registry、双架构构建与发布验证流程，详见 [STORE_PUBLISHING.md](STORE_PUBLISHING.md)。普通 main 推送不发布 Release；推送版本 tag 才触发发布。**尚不改变 root worker 的安装方式或插件目录权限，不等于店内点击即可安装。**
 
 ## 保持简单
 
