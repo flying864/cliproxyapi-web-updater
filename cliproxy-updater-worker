@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# CPA Web Updater v0.3.0: fixed, verified official stable releases only.
+# Runs as root in its own systemd oneshot; never executes arbitrary plugin input.
+set -Eeuo pipefail
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+APP=/opt/cliproxyapi
+BIN=$APP/cli-proxy-api
+SERVICE=cliproxyapi.service
+RUN=/run/cliproxy-updater
+INBOX=$RUN/inbox
+STATE=/var/lib/cliproxy-updater
+REPO=https://api.github.com/repos/router-for-me/CLIProxyAPI
+CURRENT=unknown
+LATEST=unknown
+PHASE=preflight
+TMPDIR_UPD=''
+PROCESS_ACTIVE=0
+BACKUP=''
+
+write_status() {
+  local phase="$1" message="$2" temp
+  temp=$(mktemp "$RUN/.status.XXXXXXXX")
+  python3 - "$phase" "$message" "$CURRENT" "$LATEST" > "$temp" <<'PY'
+import json,sys,datetime
+phase,detail,current,latest=sys.argv[1:5]
+print(json.dumps(dict(state=phase,detail=detail,current=current,latest=latest,
+ updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')),ensure_ascii=False))
+PY
+  chmod 0640 "$temp"
+  chown root:cliproxy "$temp"
+  sync -f "$temp"
+  mv -f -- "$temp" "$RUN/status.json"
+  sync -f "$RUN"
+}
+
+# A durable record is published before stop. Recovery never contacts GitHub.
+TX=$STATE/transaction.json
+recover() {
+  local record old rollback backup
+  [[ -e "$TX" ]] || return 0
+  record=$(python3 - "$TX" <<'PYREC'
+import json,os,stat,sys,re
+p=sys.argv[1]; st=os.lstat(p)
+assert stat.S_ISREG(st.st_mode) and st.st_uid==0 and not st.st_mode&0o077
+x=json.load(open(p)); assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',x['current'])
+assert re.fullmatch(r'/var/lib/cliproxy-updater/backups/[0-9-]+-[0-9.]+',x['backup'])
+print(x['current'],x['backup'])
+PYREC
+  ) || { write_status rollback_failed '恢复记录无效；保留材料，请人工检查'; return 1; }
+  read -r old backup <<< "$record"
+  CURRENT=$old
+  rollback=$APP/.cli-proxy-api.rollback
+  if [[ ! -f "$rollback" || -L "$rollback" ]]; then
+    write_status rollback_failed '缺少预备回滚文件；保留事务与备份'; return 1
+  fi
+  # Do not consume the rollback file: failed recovery can be retried offline.
+  if systemctl stop "$SERVICE" && cp -a -- "$rollback" "$APP/.cli-proxy-api.restore" &&
+     mv -f -- "$APP/.cli-proxy-api.restore" "$BIN" && systemctl start "$SERVICE" &&
+     wait_healthy "$old"; then
+    write_status rolled_back "旧二进制已恢复；配置/OAuth 数据可能已被新程序修改。备份：$backup" || return 1
+    finish_transaction || return 1
+    return 0
+  fi
+  write_status rollback_failed "二进制恢复失败；保留事务及备份：$backup" || true
+  return 1
+}
+cleanup() {
+  local rc=$?
+  trap - EXIT TERM INT HUP
+  set +e
+  if ((rc != 0)); then
+    if [[ -e "$TX" ]]; then recover || rc=1
+    else write_status error "阶段 $PHASE 失败（退出码 $rc）"; fi
+  fi
+  [[ -z "$TMPDIR_UPD" ]] || rm -rf -- "$TMPDIR_UPD"
+  if ((PROCESS_ACTIVE)); then rm -f -- "$RUN/processing"; fi
+  exit "$rc"
+}
+
+version_of() {
+  local v
+  v=$( (timeout --kill-after=2 8 runuser -u cliproxy -- "$1" --version 2>&1 || true) | sed -n 's/^CLIProxyAPI Version: \([^, ]*\).*/\1/p' | head -1)
+  v=${v#v}
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  printf '%s' "$v"
+}
+health_ok() {
+  local code
+  systemctl is-active --quiet "$SERVICE" || return 1
+  code=$(curl --noproxy '*' -fsS -o /dev/null -w '%{http_code}' --max-time 4 \
+    http://127.0.0.1:8317/v1/models || true)
+  [[ "$code" == 200 || "$code" == 401 ]]
+}
+
+wait_healthy() {
+  local expected=$1 attempt
+  for attempt in {1..15}; do
+    if [[ "$(version_of "$BIN" || true)" == "$expected" ]] && health_ok; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+finish_transaction() {
+  sync -f "$APP" || return 1
+  rm -f -- "$TX" || return 1
+  sync -f "$STATE" || return 1
+  rm -f -- "$APP/.cli-proxy-api.rollback" "$APP/.cli-proxy-api.new" "$APP/.cli-proxy-api.restore" || return 1
+  sync -f "$APP"
+}
+
+[[ $(id -u) == 0 ]] || exit 1
+# Inspect every trusted directory component without following symlinks.
+python3 - <<'PYSAFE'
+import os,stat,pwd,grp
+for p in ['/opt','/opt/cliproxyapi','/run','/run/cliproxy-updater','/var','/var/lib','/var/lib/cliproxy-updater','/var/lib/cliproxy-updater/backups']:
+ s=os.lstat(p)
+ assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022, 'Unsafe directory: '+p
+for p in ['/opt/cliproxyapi/cli-proxy-api']:
+ s=os.lstat(p)
+ assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022, 'Unsafe file: '+p
+p='/opt/cliproxyapi/config.yaml'; s=os.lstat(p); uid=pwd.getpwnam('cliproxy').pw_uid; gid=grp.getgrnam('cliproxy').gr_gid
+assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid in (0,uid) and not s.st_mode&0o007
+assert not s.st_mode&0o020 or s.st_gid==gid
+shift=6 if s.st_uid==uid else 3 if s.st_gid==gid else 0
+assert (s.st_mode>>shift)&0o6==0o6, 'cliproxy must read/write config.yaml for management API'
+for p in ['/var/lib/cliproxy-updater/lock','/var/lib/cliproxy-updater/transaction.json','/var/lib/cliproxy-updater/transaction.json.tmp']:
+ if os.path.lexists(p):
+  s=os.lstat(p); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and not s.st_mode&0o077
+for p in ['/opt/cliproxyapi/.cli-proxy-api.new','/opt/cliproxyapi/.cli-proxy-api.rollback','/opt/cliproxyapi/.cli-proxy-api.restore']:
+ if os.path.lexists(p):
+  s=os.lstat(p); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and not s.st_mode&0o022, 'Unsafe staging file: '+p
+PYSAFE
+[[ $(systemctl show "$SERVICE" -p User --value) == cliproxy ]] || exit 1
+[[ $(systemctl show "$SERVICE" -p Group --value) == cliproxy ]] || exit 1
+EXEC=$(systemctl show "$SERVICE" -p ExecStart --value)
+[[ "$EXEC" == "{ path=$BIN ; argv[]=$BIN -config $APP/config.yaml ; ignore_errors="* && "$EXEC" != *' ; path='* && "$EXEC" != *'} {'* ]] || exit 1
+case "${1:---check}" in --preflight) exit 0;; --check|--consume|--recover) ;; *) exit 2;; esac
+exec 9>"$STATE/lock"
+flock -w 10 9 || exit 1
+# Owning the common lock proves any processing marker is stale.
+if [[ -e "$TX" ]]; then
+  set +e
+  recover
+  rc=$?
+  rm -f -- "$RUN/processing"
+  exit "$rc"
+fi
+rm -f -- "$RUN/processing" "$TX.tmp"
+[[ "${1:---check}" != --recover ]] || exit 0
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+
+ACTION=check
+EXPECTED=''
+case "${1:---check}" in
+  --check) ;;
+  --consume)
+    PHASE=consume
+    FILE=$INBOX/request
+    [[ -f "$FILE" && ! -L "$FILE" ]] || exit 0
+    [[ ! -e "$RUN/processing" ]] || { echo 'Already processing a request' >&2; exit 1; }
+    mv -T -- "$FILE" "$RUN/processing"
+    PROCESS_ACTIVE=1
+    [[ -f "$RUN/processing" && ! -L "$RUN/processing" ]] || { echo 'Bad request file' >&2; exit 1; }
+    [[ $(stat -c %u "$RUN/processing") == $(id -u cliproxy) ]] || { echo 'Bad request owner' >&2; exit 1; }
+    [[ $(stat -c %h "$RUN/processing") == 1 ]] || { echo 'Bad link count' >&2; exit 1; }
+    [[ $(stat -c %s "$RUN/processing") -le 64 ]] || { echo 'Oversized request' >&2; exit 1; }
+    chown root:root "$RUN/processing"
+    chmod 0400 "$RUN/processing"
+    REQUEST=$(cat "$RUN/processing")
+    if [[ "$REQUEST" == check ]]; then
+      ACTION=check
+    elif [[ "$REQUEST" =~ ^update\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+      ACTION=update
+      EXPECTED="${BASH_REMATCH[1]}"
+    else
+      echo 'Invalid action: only check or update vN.N.N allowed' >&2
+      exit 1
+    fi
+    ;;
+  *) echo 'Unsupported worker argument' >&2; exit 2 ;;
+esac
+
+CURRENT=$(version_of "$BIN") || { echo 'Unable to identify binary version' >&2; exit 1; }
+PHASE=checking
+write_status checking "正在查询官方 GitHub 最新正式版本"
+# Official GitHub endpoint only. No user-specified download URL or repository.
+LATEST=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+  --max-filesize 1048576 --retry 2 --connect-timeout 10 --max-time 55 \
+  "$REPO/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+[[ "$LATEST" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Unexpected release tag' >&2; exit 1; }
+if [[ "$ACTION" == update && "$EXPECTED" != "$LATEST" ]]; then
+  PHASE=version_changed
+  write_status needs_recheck "发布版本发生变化，原先确认 $EXPECTED、当前 $LATEST；请重新检查并确认"
+  exit 0
+fi
+VERSIONS=$(python3 - "$CURRENT" "$LATEST" <<'PY'
+import sys
+current=tuple(int(x) for x in sys.argv[1].split('.'))
+latest=tuple(int(x) for x in sys.argv[2].lstrip('v').split('.'))
+print('newer' if latest>current else 'current')
+PY
+)
+if [[ "$VERSIONS" == current ]]; then
+  write_status current '当前已是最新版本（不允许自动降级）'
+  exit 0
+fi
+if [[ "$ACTION" == check ]]; then
+  write_status ready "新版本 $LATEST 可用，需手动确认升级"
+  exit 0
+fi
+
+PHASE=preflight
+[[ "$EXPECTED" == "$LATEST" ]] || { echo 'Version approval mismatch' >&2; exit 1; }
+systemctl is-active --quiet "$SERVICE" || { echo 'CLIProxyAPI not currently active' >&2; exit 1; }
+# Sufficient headroom for download, binary and backup on a small VPS.
+for dir in "$APP" "$STATE" /var/tmp; do
+  free_kb=$(df -Pk "$dir" | awk 'NR==2{print $4}')
+  [[ "$free_kb" =~ ^[0-9]+$ && "$free_kb" -ge 262144 ]] || {
+    echo "Insufficient free space at $dir: ${free_kb:-unknown} KB" >&2; exit 1;
+  }
+done
+case "$(uname -m)" in
+  x86_64) ARCH=amd64 ;;
+  aarch64) ARCH=aarch64 ;;
+  *) echo 'Unsupported architecture' >&2; exit 1 ;;
+esac
+ASSET="CLIProxyAPI_${LATEST#v}_linux_${ARCH}.tar.gz"
+RELEASE="https://github.com/router-for-me/CLIProxyAPI/releases/download/$LATEST"
+TMPDIR_UPD=$(mktemp -d /var/tmp/cliproxy-upd.XXXXXXXX)
+PHASE=download
+write_status downloading "正在下载 $LATEST 并验证发布包 SHA256"
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fL --retry 2 \
+  --max-filesize 67108864 --connect-timeout 10 --max-time 180 -o "$TMPDIR_UPD/$ASSET" "$RELEASE/$ASSET"
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fL --retry 2 \
+  --max-filesize 1048576 --connect-timeout 10 --max-time 55 -o "$TMPDIR_UPD/checksums.txt" "$RELEASE/checksums.txt"
+(
+ cd "$TMPDIR_UPD"
+ awk -v asset="$ASSET" '$2==asset {print; n++} END{if(n!=1)exit 1}' checksums.txt | sha256sum -c -
+)
+# Only read exact expected regular file. Do not extract arbitrary tar paths.
+python3 - "$TMPDIR_UPD/$ASSET" "$TMPDIR_UPD/cli-proxy-api" <<'PY'
+import os,sys,tarfile,shutil
+archive,out=sys.argv[1:]
+with tarfile.open(archive,'r|gz') as t:
+    matches=[]; total=0
+    for n,m in enumerate(t):
+        total+=m.size
+        if n>=128 or total>200_000_000: raise SystemExit('Archive budget exceeded')
+        if m.name.removeprefix('./')=='cli-proxy-api':
+            if not m.isfile() or not 1_000_000<=m.size<=150_000_000: raise SystemExit('Invalid executable')
+            matches.append(m)
+            with t.extractfile(m) as src, open(out,'wb') as dst: shutil.copyfileobj(src,dst)
+
+    if len(matches)!=1: raise SystemExit('Missing/duplicate release executable')
+    if not 1_000_000 <= matches[0].size <= 150_000_000: raise SystemExit('Suspicious binary size')
+os.chmod(out,0o755)
+PY
+# Never execute newly downloaded code with root privileges for a version check.
+# Inspect the minimal ELF header and machine statically; runtime version is checked
+# only after systemd starts the executable under the non-root `cliproxy` user.
+python3 - "$TMPDIR_UPD/cli-proxy-api" "$ARCH" <<'PYELF'
+import sys,struct
+p,arch=sys.argv[1:]
+with open(p,'rb') as f: header=f.read(64)
+if not (len(header)>=64 and header[:4]==b'\x7fELF' and header[4]==2 and header[5]==1):
+    raise SystemExit('Download is not a 64-bit little-endian ELF binary')
+machine=struct.unpack_from('<H',header,18)[0]
+expected={'amd64':62,'aarch64':183}[arch]
+if machine!=expected: raise SystemExit('ELF architecture mismatch')
+PYELF
+
+PHASE=backup
+# Bound backup storage even across repeated failures; never prune recovery material.
+usage=$(du -sk "$STATE/backups" | cut -f1)
+[[ "$usage" -le 1048576 ]] || { echo 'Backup retention budget exhausted; archive old backups manually' >&2; exit 1; }
+need=$(du -sk "$APP" | cut -f1)
+[[ "$need" -le 524288 ]] && ((usage + need <= 1048576)) || { echo 'Backup budget exhausted; retain failed backups for manual review' >&2; exit 1; }
+for dir in "$APP" "$STATE"; do
+ free_kb=$(df -Pk "$dir" | awk 'NR==2{print $4}')
+ ((free_kb >= need + 524288)) || exit 1
+done
+BACKUP="$STATE/backups/$(date -u +%Y%m%d-%H%M%S)-${CURRENT}"
+mkdir -m 0700 "$BACKUP"
+write_status backing_up "正在备份旧程序、配置和 OAuth 数据"
+cp -a "$BIN" "$BACKUP/cli-proxy-api"
+items=(config.yaml)
+for name in auths plugins static; do [[ ! -e "$APP/$name" ]] || items+=("$name"); done
+tar -C "$APP" -czf "$BACKUP/runtime-config.tar.gz" "${items[@]}"
+chmod 0600 "$BACKUP/runtime-config.tar.gz"
+
+PHASE=install
+write_status installing "备份完成，正在安装 $LATEST（API 服务会短暂重启）"
+install -m 0755 "$TMPDIR_UPD/cli-proxy-api" "$APP/.cli-proxy-api.new"
+chown --reference="$BIN" "$APP/.cli-proxy-api.new"
+# Update while the service is stopped. Binary replacement is an atomic rename.
+cp -a -- "$BIN" "$APP/.cli-proxy-api.rollback"
+sync -f "$APP/.cli-proxy-api.rollback"
+sync -f "$APP"
+python3 - "$TX" "$CURRENT" "$BACKUP" <<'PYTX'
+import json,os,sys
+p,current,backup=sys.argv[1:]
+with open(p+'.tmp','x') as f:
+ json.dump(dict(current=current,backup=backup),f); f.flush(); os.fsync(f.fileno())
+os.replace(p+'.tmp',p)
+fd=os.open(os.path.dirname(p),os.O_DIRECTORY); os.fsync(fd); os.close(fd)
+PYTX
+systemctl stop "$SERVICE"
+mv -f -- "$APP/.cli-proxy-api.new" "$BIN"
+systemctl start "$SERVICE"
+PHASE=healthcheck
+write_status verifying "正在确认新程序版本及本机 API 健康状态"
+if wait_healthy "${LATEST#v}"; then
+    CURRENT="${LATEST#v}"
+    write_status success "成功升级到 $LATEST。原程序及数据备份：$BACKUP"
+    finish_transaction
+    exit 0
+fi
+printf 'New release failed health check, rolling back.\n' >&2
+exit 1

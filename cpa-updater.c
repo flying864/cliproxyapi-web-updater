@@ -1,0 +1,234 @@
+#define _GNU_SOURCE
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
+#define JSMN_PARENT_LINKS
+#define JSMN_STATIC
+#define JSMN_STRICT
+#include "jsmn.h"
+
+typedef struct { void *ptr; size_t len; } cliproxy_buffer;
+typedef int (*host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*host_free_fn)(void*, size_t);
+typedef struct { uint32_t abi_version; void *host_ctx; host_call_fn call; host_free_fn free_buffer; } cliproxy_host_api;
+typedef int (*plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
+typedef void (*plugin_free_fn)(void*, size_t);
+typedef void (*plugin_shutdown_fn)(void);
+typedef struct { uint32_t abi_version; plugin_call_fn call; plugin_free_fn free_buffer; plugin_shutdown_fn shutdown; } cliproxy_plugin_api;
+
+#ifndef CPA_TEST
+#undef CPA_RUN
+#undef CPA_STATUS_UID
+#define CPA_RUN "/run/cliproxy-updater"
+#define CPA_STATUS_UID 0
+#endif
+#define REQUEST_FILE CPA_RUN "/inbox/request"
+#define PROCESSING_FILE CPA_RUN "/processing"
+#define STATUS_FILE CPA_RUN "/status.json"
+
+static const char *html =
+"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+"<title>CLIProxyAPI 更新</title><style>body{font:15px system-ui,sans-serif;max-width:760px;margin:35px auto;padding:0 16px;line-height:1.7;color:#17212e}"
+".card{border:1px solid #d3dbe7;border-radius:12px;padding:20px;margin:15px 0}button{border:0;border-radius:8px;background:#1456b8;color:#fff;padding:11px 16px;cursor:pointer;margin-right:8px}"
+"button.danger{background:#0a743e}input{padding:10px;width:min(440px,95%);border:1px solid #ccd3dc;border-radius:8px}pre{white-space:pre-wrap;word-break:break-word}"
+"small{color:#667}p{margin:8px 0}</style></head><body>"
+"<h2>CLIProxyAPI 一键更新</h2><p>检查官方正式版并确认版本后升级；自动校验 SHA256 并尝试二进制故障回滚（不回滚 OAuth 数据）。升级时会短暂中断 API 服务。</p>"
+"<div class='card'><label for='key'>管理密钥（仅在本页面内存中使用，不保存到浏览器）</label><p><input id='key' type='password' autocomplete='off' placeholder='CLIProxyAPI Management Key'></p>"
+"<p><button id='status'>读取状态</button><button id='check'>检查版本</button><button id='update' class='danger'>一键升级正式版</button></p></div>"
+"<div class='card'><p>本机版本：<strong id='current'>—</strong></p><p>最新版本：<strong id='latest'>—</strong></p>"
+"<p>任务状态：<strong id='state'>—</strong></p><p>更新时间：<span id='when'>—</span></p><pre id='detail'></pre></div>"
+"<small>主程序自动升级已关闭，仅每周检查。升级操作需 Management Key。请通过 HTTPS 或 SSH 转发访问；升级进行时页面可能暂时断线。</small>"
+"<script>const api='/v0/management/plugins/cpa-updater';const el=id=>document.getElementById(id);"
+"async function call(s,method='GET'){const key=el('key').value.trim();if(!key){el('detail').textContent='请先输入管理密钥';return;}"
+"try{const r=await fetch(api+s,{method,cache:'no-store',credentials:'omit',headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'}});"
+"const t=await r.text();let j;try{j=JSON.parse(t)}catch{throw Error('HTTP '+r.status+' '+t.slice(0,160))}if(!r.ok)throw Error(j.error||j.detail||'HTTP '+r.status);"
+"if(s==='/status'){el('current').textContent=j.current||'—';el('latest').textContent=j.latest||'—';el('state').textContent=j.state||'—';el('when').textContent=j.updated_at||'—';el('detail').textContent=j.detail||'';}"
+"else{el('detail').textContent=j.message||'任务已提交';setTimeout(()=>call('/status'),1200)}}catch(e){el('detail').textContent=String(e)}}"
+"el('status').onclick=()=>call('/status');el('check').onclick=()=>call('/check','POST');"
+"el('update').onclick=()=>{const v=el('latest').textContent;if(el('state').textContent!=='ready'||!/^v[0-9]+[.][0-9]+[.][0-9]+$/.test(v)){el('detail').textContent='请先点击检查版本，确认有新版本';return;}if(confirm('确认将 CLIProxyAPI 升级至 '+v+'？升级将短暂断开 Hermes 等所有 API 客户端。'))call('/update?version='+encodeURIComponent(v),'POST')};"
+"setInterval(()=>{if(el('key').value)call('/status')},7000);</script></body></html>";
+
+static const char enc[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static char *base64(const uint8_t *b, size_t n){
+  size_t outlen=4*((n+2)/3); char *out=malloc(outlen+1); if(!out)return NULL;
+  size_t i=0,k=0; while(i<n){ uint32_t v=(uint32_t)b[i++]<<16; int count=1;
+    if(i<n){v|=(uint32_t)b[i++]<<8;count++;} if(i<n){v|=b[i++];count++;}
+    out[k++]=enc[(v>>18)&63];out[k++]=enc[(v>>12)&63];out[k++]=(count>=2?enc[(v>>6)&63]:'=');out[k++]=(count>=3?enc[v&63]:'=');
+  }out[k]=0;return out;
+}
+static int respond(cliproxy_buffer *resp, const char *s){
+  size_t n=strlen(s); char *p=malloc(n+1); if(!p)return 1;memcpy(p,s,n+1);resp->ptr=p;resp->len=n;return 0;
+}
+static int deliver(cliproxy_buffer *r,int status,const char *content_type,const char *body){
+  char *encoded=base64((const uint8_t*)body,strlen(body));if(!encoded)return 1;
+  size_t needed=strlen(encoded)+300;char *json=malloc(needed);if(!json){free(encoded);return 1;}
+  snprintf(json,needed,"{\"ok\":true,\"result\":{\"StatusCode\":%d,\"Headers\":{\"Content-Type\":[\"%s\"],\"Cache-Control\":[\"no-store\"]},\"Body\":\"%s\"}}",status,content_type,encoded);
+  int rc=respond(r,json);free(json);free(encoded);return rc;
+}
+static int send_error(cliproxy_buffer *r,int status,const char *message){
+  char safe[256];size_t i=0;for(const char *p=message;*p&&i<sizeof(safe)-1;p++)if(*p!='"'&&*p!='\\'&&*p!='\n')safe[i++]=*p;safe[i]=0;
+  char data[384];snprintf(data,sizeof(data),"{\"error\":\"%s\"}",safe);
+  return deliver(r,status,"application/json; charset=utf-8",data);
+}
+/* Token offsets are bounded by the ABI length. Validate separators as jsmn
+ * alone deliberately tokenizes some non-JSON syntax. Never search nested keys. */
+typedef struct { const char *s; size_t len; jsmntok_t t[1024]; int n; } document;
+static void whitespace(const document *d,int *p){
+  while((size_t)*p<d->len && strchr(" \t\r\n",d->s[*p]))++*p;
+}
+static int grammar(document *d,int *i,int *pos,int depth){
+  if(depth>32 || *i>=d->n)return 0;
+  jsmntok_t *t=&d->t[(*i)++];whitespace(d,pos);
+  if(*pos!=t->start-(t->type==JSMN_STRING))return 0;
+  if(t->type==JSMN_OBJECT || t->type==JSMN_ARRAY){
+    int object=t->type==JSMN_OBJECT,first=1; ++*pos;
+    while(*i<d->n && d->t[*i].start<t->end-1){
+      whitespace(d,pos);
+      if(!first){if(d->s[(*pos)++]!=',')return 0;whitespace(d,pos);}first=0;
+      if(object){
+        if(d->t[*i].type!=JSMN_STRING)return 0;
+        int key=*i;
+        if(!grammar(d,i,pos,depth+1))return 0;
+        /* Disallow escaped keys and duplicate direct keys. */
+        if(memchr(d->s+d->t[key].start,'\\',(size_t)(d->t[key].end-d->t[key].start)))return 0;
+        for(int k=key-1;k>=0;k--){
+          if(d->t[k].parent!=d->t[key].parent || d->t[k].type!=JSMN_STRING)continue;
+          int n=d->t[key].end-d->t[key].start;
+          if(d->t[k].end-d->t[k].start==n && !memcmp(d->s+d->t[k].start,d->s+d->t[key].start,(size_t)n))return 0;
+        }
+        whitespace(d,pos);if(d->s[(*pos)++]!=':')return 0;
+      }
+      if(!grammar(d,i,pos,depth+1))return 0;
+    }
+    whitespace(d,pos);
+    if(*pos!=t->end-1 || d->s[(*pos)++]!=(object?'}':']'))return 0;
+  }else{
+    if(t->type==JSMN_PRIMITIVE){
+      const char *s=d->s+t->start;size_t n=(size_t)(t->end-t->start);
+      if(!((n==4&&!memcmp(s,"true",4))||(n==5&&!memcmp(s,"false",5))||(n==4&&!memcmp(s,"null",4)))){
+        size_t p=0;if(p<n&&s[p]=='-')p++;
+        if(p>=n)return 0;
+        if(s[p]=='0')p++;else{if(s[p]<'1'||s[p]>'9')return 0;while(p<n&&s[p]>='0'&&s[p]<='9')p++;}
+        if(p<n&&s[p]=='.'){p++;size_t a=p;while(p<n&&s[p]>='0'&&s[p]<='9')p++;if(p==a)return 0;}
+        if(p<n&&(s[p]=='e'||s[p]=='E')){p++;if(p<n&&(s[p]=='+'||s[p]=='-'))p++;size_t a=p;while(p<n&&s[p]>='0'&&s[p]<='9')p++;if(p==a)return 0;}
+        if(p!=n)return 0;
+      }
+    }else for(int k=t->start;k<t->end;k++)if((unsigned char)d->s[k]<32)return 0;
+    *pos=t->end+(t->type==JSMN_STRING);
+  }
+  return 1;
+}
+static int parse(document *d,const char *s,size_t len){
+  if(!s || !len || memchr(s,0,len))return 0;
+  d->s=s;d->len=len;jsmn_parser p;jsmn_init(&p);
+  d->n=jsmn_parse(&p,s,len,d->t,1024);
+  if(d->n<1 || d->t[0].type!=JSMN_OBJECT)return 0;
+  int i=0,pos=0;if(!grammar(d,&i,&pos,0))return 0;
+  whitespace(d,&pos);return i==d->n && (size_t)pos==len;
+}
+static int member(const document *d,int object,const char *name){
+  if(object<0 || d->t[object].type!=JSMN_OBJECT)return -1;
+  for(int i=object+1;i<d->n && d->t[i].start<d->t[object].end;i++)
+    if(d->t[i].parent==object && d->t[i].type==JSMN_STRING &&
+       d->t[i].end-d->t[i].start==(int)strlen(name) &&
+       !memcmp(d->s+d->t[i].start,name,strlen(name)))return i+1;
+  return -1;
+}
+static int string_value(const document *d,int i,char *out,size_t cap){
+  if(i<0 || i>=d->n || d->t[i].type!=JSMN_STRING)return 0;
+  size_t n=(size_t)(d->t[i].end-d->t[i].start);
+  if(n>=cap || memchr(d->s+d->t[i].start,'\\',n))return 0;
+  memcpy(out,d->s+d->t[i].start,n);out[n]=0;return 1;
+}
+static int field(const document *d,const char *key,char *out,size_t cap){
+  return string_value(d,member(d,0,key),out,cap);
+}
+static int valid_version(const char *s){
+  if(*s++!='v')return 0;
+  for(int part=0;part<3;part++){
+    const char *start=s;while(*s>='0'&&*s<='9')s++;
+    if(start==s)return 0;
+    if(part<2){if(*s++!='.')return 0;}else if(*s)return 0;
+  }return 1;
+}
+/* Trust only worker-owned single-link regular files, never writable by others. */
+static int read_status(char *buf,size_t cap){
+  int fd=open(STATUS_FILE,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+  if(fd<0)return errno==ENOENT?0:-1;
+  struct stat st;
+  if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=CPA_STATUS_UID||
+     (st.st_mode&022)||st.st_nlink!=1||st.st_size<=0||st.st_size>8192){close(fd);return -1;}
+  size_t n=0;
+  while(n<cap-1){ssize_t got=read(fd,buf+n,cap-1-n);if(got<0&&errno==EINTR)continue;
+    if(got<0){close(fd);return -1;}if(!got)break;n+=(size_t)got;}
+  close(fd);buf[n]=0;
+  document d;if(n!=(size_t)st.st_size || !parse(&d,buf,n))return -1;
+  return (int)n;
+}
+static int get_status(cliproxy_buffer *r){
+  char buf[8194];int n=read_status(buf,sizeof(buf));
+  if(n<0)return send_error(r,503,"无效状态文件");
+  return deliver(r,200,"application/json; charset=utf-8",n?buf:"{\"state\":\"initializing\",\"detail\":\"尚未完成首次版本检查\"}");
+}
+static int queue_job(cliproxy_buffer *r,const char *action,const char *expected){
+  char task[64];
+  if(!strcmp(action,"update")){
+    if(!expected || !valid_version(expected))return send_error(r,409,"缺少或无效的确认版本");
+    char status[8194],state[32],latest[40];int n=read_status(status,sizeof(status));
+    if(n<0)return send_error(r,503,"状态异常");
+    document d;
+    if(!n || !parse(&d,status,(size_t)n) || !field(&d,"state",state,sizeof(state)) || strcmp(state,"ready") ||
+       !field(&d,"latest",latest,sizeof(latest)) || !valid_version(latest) || strcmp(latest,expected))
+      return send_error(r,409,"版本已变化，请重新检查并确认");
+    snprintf(task,sizeof(task),"update %s",expected);
+  }else strcpy(task,"check");
+  struct stat st;
+  if(lstat(PROCESSING_FILE,&st)==0)return send_error(r,409,"已有任务正在执行");
+  if(errno!=ENOENT)return send_error(r,503,"无法检查任务状态");
+  char tmp[]=CPA_RUN "/inbox/.request.XXXXXX";
+  int fd=mkostemp(tmp,O_CLOEXEC);
+  if(fd<0)return send_error(r,503,"无法创建任务请求");
+  size_t len=strlen(task);ssize_t n=write(fd,task,len);int flush=fsync(fd);int close_rc=close(fd);
+  if(n!=(ssize_t)len||flush||close_rc){unlink(tmp);return send_error(r,503,"任务请求写入失败");}
+  /* The worker always observes exactly one link, even during publication. */
+  int rc=renameat2(AT_FDCWD,tmp,AT_FDCWD,REQUEST_FILE,RENAME_NOREPLACE);
+  int saved=errno;if(rc)unlink(tmp);
+  if(rc)return send_error(r,saved==EEXIST?409:503,"无法提交任务或已有任务排队");
+  return deliver(r,202,"application/json; charset=utf-8","{\"message\":\"任务已提交\"}");
+}
+
+static int plugin_call(char *method,uint8_t *req,size_t len,cliproxy_buffer *response){
+  response->ptr=NULL;response->len=0;
+  if(!strcmp(method,"plugin.register")||!strcmp(method,"plugin.reconfigure"))
+    return respond(response,"{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{\"Name\":\"CPA Web Updater\",\"Version\":\"0.3.0\",\"Author\":\"Local deployment\",\"GitHubRepository\":\"https://github.com/flying864/cliproxyapi-web-updater\",\"Logo\":\"\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}}");
+  if(!strcmp(method,"management.register"))
+    return respond(response,"{\"ok\":true,\"result\":{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/cpa-updater/status\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/check\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/update\"}],\"resources\":[{\"Path\":\"/panel\",\"Menu\":\"CPA 一键更新\",\"Description\":\"检查版本、安装更新和回滚\"}]}}");
+  if(strcmp(method,"management.handle"))return respond(response,"{\"ok\":false,\"error\":{\"code\":\"unknown_method\",\"message\":\"Unknown plugin method\"}}");
+  if(len>65536)return send_error(response,413,"请求过长");
+  document d;
+  if(!parse(&d,(const char*)req,len))return send_error(response,400,"无效 JSON 请求");
+  char http_method[16]={0},path[256]={0},expected[40]={0};
+  if(!field(&d,"Method",http_method,sizeof(http_method)) || !field(&d,"Path",path,sizeof(path)))
+    return send_error(response,400,"缺少请求方法或路径");
+  int query=member(&d,0,"Query"),version=member(&d,query,"version");
+  if(version>=0 && d.t[version].type==JSMN_ARRAY && d.t[version].size==1)
+    string_value(&d,version+1,expected,sizeof(expected));
+  int is_get=!strcmp(http_method,"GET"),is_post=!strcmp(http_method,"POST");
+  if(!strcmp(path,"/v0/management/plugins/cpa-updater/status")&&is_get)return get_status(response);
+  if(!strcmp(path,"/v0/management/plugins/cpa-updater/check")&&is_post)return queue_job(response,"check",NULL);
+  if(!strcmp(path,"/v0/management/plugins/cpa-updater/update")&&is_post)return queue_job(response,"update",expected);
+  if((!strcmp(path,"/panel")||!strcmp(path,"/v0/resource/plugins/cpa-updater/panel"))&&is_get)
+    return deliver(response,200,"text/html; charset=utf-8",html);
+  return send_error(response,404,"未知插件接口");
+}
+static void plugin_free(void *ptr,size_t size){(void)size;free(ptr);}
+static void plugin_shutdown(void){}
+__attribute__((visibility("default"))) int cliproxy_plugin_init(const cliproxy_host_api *host,cliproxy_plugin_api *plugin){
+  (void)host;if(!plugin)return 1;plugin->abi_version=1;plugin->call=plugin_call;plugin->free_buffer=plugin_free;plugin->shutdown=plugin_shutdown;return 0;
+}

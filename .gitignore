@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.so
+*.o
+*.tar.gz
+*.zip
+.coverage
+.pytest_cache/
+build/
+dist/
+test-output/
+.env
+*.key
