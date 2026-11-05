@@ -58,10 +58,26 @@ class ApplyTests(unittest.TestCase):
             before = {name: (root / name).read_bytes() for name in (*overlay.PATTERNS, overlay.VERIFY)}
             # Inject only the post-write child command boundary. Real filesystem
             # writes/rollback and Git root/clean checks still run unmodified.
-            with patch.object(overlay.subprocess, 'run', side_effect=RuntimeError('injected validation failure')):
+            versions = overlay.source_versions
+            def historical_source(root):
+                values = versions(root)
+                return dict.fromkeys(values, '0.4.0') if Path(root) == ROOT else values
+            with patch.object(overlay, 'source_versions', side_effect=historical_source), patch.object(overlay.subprocess, 'run', side_effect=RuntimeError('injected validation failure')):
                 with self.assertRaisesRegex(RuntimeError, 'injected validation failure'):
                     overlay.apply(root, ROOT)
             self.assertEqual(before, {name: (root / name).read_bytes() for name in before})
+            self.assertEqual(b'', subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain']))
+
+    def test_new_runtime_versions_do_not_run_legacy_overlay(self):
+        overlay = importlib.import_module('apply_overlay')
+        versions = overlay.source_versions
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.target(tmp)
+            def new_source(path):
+                values = versions(path)
+                return dict.fromkeys(values, '0.5.0') if Path(path) == ROOT else values
+            with patch.object(overlay, 'source_versions', side_effect=new_source), self.assertRaisesRegex(ValueError, 'v0.4.0'):
+                overlay.apply(root, ROOT)
             self.assertEqual(b'', subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain']))
 
     def test_ignored_overlay_target_is_not_overwritten(self):
@@ -71,7 +87,11 @@ class ApplyTests(unittest.TestCase):
             (root / '.git/info/exclude').write_text('registry.json\n')
             target = root / 'registry.json'
             target.write_text('preserve ignored fixture')
-            with self.assertRaisesRegex(ValueError, 'existing overlay target'):
+            versions = overlay.source_versions
+            def historical_source(path):
+                values = versions(path)
+                return dict.fromkeys(values, '0.4.0') if Path(path) == ROOT else values
+            with patch.object(overlay, 'source_versions', side_effect=historical_source), self.assertRaisesRegex(ValueError, 'existing overlay target'):
                 overlay.apply(root, ROOT)
             self.assertEqual(target.read_text(), 'preserve ignored fixture')
 

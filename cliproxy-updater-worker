@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CPA Web Updater v0.4.0: fixed, verified official stable releases only.
+# CPA Web Updater v0.5.0: fixed, verified official stable releases only.
 # Runs as root in its own systemd oneshot; never executes arbitrary plugin input.
 set -Eeuo pipefail
 umask 077
@@ -10,6 +10,8 @@ SERVICE=cliproxyapi.service
 RUN=/run/cliproxy-updater
 INBOX=$RUN/inbox
 STATE=/var/lib/cliproxy-updater
+PUBLIC=/var/lib/cliproxy-updater-status
+HELPER=/usr/local/libexec/cliproxy-updater-runtime.py
 REPO=https://api.github.com/repos/router-for-me/CLIProxyAPI
 CURRENT=unknown
 LATEST=unknown
@@ -20,18 +22,18 @@ BACKUP=''
 
 write_status() {
   local phase="$1" message="$2" temp
-  temp=$(mktemp "$RUN/.status.XXXXXXXX")
-  python3 - "$phase" "$message" "$CURRENT" "$LATEST" > "$temp" <<'PY'
+  temp=$(mktemp "$PUBLIC/.status.XXXXXXXX")
+  python3 - "$phase" "$message" "$CURRENT" "$LATEST" "${WORKER_VERSION:-0.5.0}" > "$temp" <<'PY'
 import json,sys,datetime
 phase,detail,current,latest=sys.argv[1:5]
-print(json.dumps(dict(state=phase,detail=detail,current=current,latest=latest,
- updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')),ensure_ascii=False))
+print(json.dumps(dict(protocol=1,worker_version=sys.argv[5],state=phase,detail=detail,current=current,latest=latest,
+ updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds')),ensure_ascii=False))
 PY
   chmod 0640 "$temp"
   chown root:cliproxy "$temp"
   sync -f "$temp"
-  mv -f -- "$temp" "$RUN/status.json"
-  sync -f "$RUN"
+  mv -f -- "$temp" "$PUBLIC/status.json"
+  sync -f "$PUBLIC"
 }
 
 # A durable record is published before stop. Recovery never contacts GitHub.
@@ -73,6 +75,11 @@ cleanup() {
     if [[ -e "$TX" ]]; then recover || rc=1
     else write_status error "阶段 $PHASE 失败（退出码 $rc）"; fi
   fi
+  # Under the common lock, retire a failed unconsumed request so PathExists
+  # cannot loop forever after a normal preflight error. Never follow it.
+  if ((rc != 0)) && [[ "${MODE:-}" == --consume ]]; then
+    rm -f -- "$INBOX/request"
+  fi
   [[ -z "$TMPDIR_UPD" ]] || rm -rf -- "$TMPDIR_UPD"
   if ((PROCESS_ACTIVE)); then rm -f -- "$RUN/processing"; fi
   exit "$rc"
@@ -85,18 +92,30 @@ version_of() {
   [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
   printf '%s' "$v"
 }
-health_ok() {
-  local code
+health_sample() {
+  local expected=$1 code headers running restarts pid
   systemctl is-active --quiet "$SERVICE" || return 1
-  code=$(curl --noproxy '*' -fsS -o /dev/null -w '%{http_code}' --max-time 4 \
-    http://127.0.0.1:8317/v1/models || true)
-  [[ "$code" == 200 || "$code" == 401 ]]
+  restarts=$(systemctl show "$SERVICE" -p NRestarts --value)
+  pid=$(systemctl show "$SERVICE" -p MainPID --value)
+  [[ "$restarts" == 0 && "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  headers=$(curl --noproxy '*' -sS -D - -o /dev/null --max-time 4     http://127.0.0.1:8317/v8/management/config) || return 1
+  running=$(printf '%s' "$headers" | python3 -c 'import re,sys; h=re.findall(r"(?im)^X-CPA-VERSION:[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*\r?$",sys.stdin.read()); print(h[0] if len(h)==1 else "")')
+  [[ "$running" == "$expected" ]] || return 1
+  code=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --max-time 4     http://127.0.0.1:8317/v1/models) || return 1
+  [[ "$code" == 200 || "$code" == 401 ]] || return 1
+  printf '%s' "$pid"
 }
 
 wait_healthy() {
-  local expected=$1 attempt
+  local expected=$1 attempt sample previous='' stable=0
   for attempt in {1..15}; do
-    if [[ "$(version_of "$BIN" || true)" == "$expected" ]] && health_ok; then return 0; fi
+    if sample=$(health_sample "$expected"); then
+      if [[ "$sample" == "$previous" ]]; then stable=$((stable+1)); else stable=1; fi
+      previous=$sample
+      (( stable >= 3 )) && return 0
+    else
+      stable=0; previous=''
+    fi
     sleep 2
   done
   return 1
@@ -113,17 +132,14 @@ finish_transaction() {
 # Inspect every trusted directory component without following symlinks.
 python3 - <<'PYSAFE'
 import os,stat,pwd,grp
-for p in ['/opt','/opt/cliproxyapi','/run','/run/cliproxy-updater','/var','/var/lib','/var/lib/cliproxy-updater','/var/lib/cliproxy-updater/backups']:
+for p in ['/opt','/opt/cliproxyapi','/run','/run/cliproxy-updater','/var','/var/lib','/var/lib/cliproxy-updater','/var/lib/cliproxy-updater/backups','/var/lib/cliproxy-updater-status']:
  s=os.lstat(p)
  assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022, 'Unsafe directory: '+p
+s=os.lstat('/run/cliproxy-updater/inbox')
+assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o007, 'Unsafe inbox'
 for p in ['/opt/cliproxyapi/cli-proxy-api']:
  s=os.lstat(p)
  assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022, 'Unsafe file: '+p
-p='/opt/cliproxyapi/config.yaml'; s=os.lstat(p); uid=pwd.getpwnam('cliproxy').pw_uid; gid=grp.getgrnam('cliproxy').gr_gid
-assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid in (0,uid) and not s.st_mode&0o007
-assert not s.st_mode&0o020 or s.st_gid==gid
-shift=6 if s.st_uid==uid else 3 if s.st_gid==gid else 0
-assert (s.st_mode>>shift)&0o6==0o6, 'cliproxy must read/write config.yaml for management API'
 for p in ['/var/lib/cliproxy-updater/lock','/var/lib/cliproxy-updater/transaction.json','/var/lib/cliproxy-updater/transaction.json.tmp']:
  if os.path.lexists(p):
   s=os.lstat(p); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and not s.st_mode&0o077
@@ -131,11 +147,30 @@ for p in ['/opt/cliproxyapi/.cli-proxy-api.new','/opt/cliproxyapi/.cli-proxy-api
  if os.path.lexists(p):
   s=os.lstat(p); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and not s.st_mode&0o022, 'Unsafe staging file: '+p
 PYSAFE
-[[ $(systemctl show "$SERVICE" -p User --value) == cliproxy ]] || exit 1
-[[ $(systemctl show "$SERVICE" -p Group --value) == cliproxy ]] || exit 1
-EXEC=$(systemctl show "$SERVICE" -p ExecStart --value)
-[[ "$EXEC" == "{ path=$BIN ; argv[]=$BIN -config $APP/config.yaml ; ignore_errors="* && "$EXEC" != *' ; path='* && "$EXEC" != *'} {'* ]] || exit 1
-case "${1:---check}" in --preflight) exit 0;; --check|--consume|--recover) ;; *) exit 2;; esac
+MODE=${1:---check}
+case "$MODE" in --preflight|--check|--consume|--recover) ;; *) exit 2;; esac
+normal_preflight() {
+  python3 - <<'PYCONFIG'
+import os,stat,pwd,grp
+p='/opt/cliproxyapi/config.yaml'; s=os.lstat(p); uid=pwd.getpwnam('cliproxy').pw_uid; gid=grp.getgrnam('cliproxy').gr_gid
+assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid in (0,uid) and not s.st_mode&0o007
+assert not s.st_mode&0o020 or s.st_gid==gid
+shift=6 if s.st_uid==uid else 3 if s.st_gid==gid else 0
+assert (s.st_mode>>shift)&0o6==0o6, 'cliproxy must read/write config.yaml for management API'
+PYCONFIG
+# Fixed trusted helper only; no imports from application/plugins/cwd.
+python3 - "$HELPER" <<'PYHELPER'
+import os,stat,sys
+p=sys.argv[1]
+for path in ['/usr','/usr/local','/usr/local/libexec',p]:
+ s=os.lstat(path)
+ assert s.st_uid==0 and not s.st_mode&0o022 and not stat.S_ISLNK(s.st_mode), 'Unsafe helper: '+path
+assert stat.S_ISREG(s.st_mode) and s.st_nlink==1
+PYHELPER
+python3 "$HELPER" preflight
+  WORKER_VERSION=$(python3 "$HELPER" version)
+}
+if [[ "$MODE" == --preflight ]]; then normal_preflight; exit $?; fi
 exec 9>"$STATE/lock"
 flock -w 10 9 || exit 1
 # Owning the common lock proves any processing marker is stale.
@@ -146,12 +181,30 @@ if [[ -e "$TX" ]]; then
   rm -f -- "$RUN/processing"
   exit "$rc"
 fi
-rm -f -- "$RUN/processing" "$TX.tmp"
-[[ "${1:---check}" != --recover ]] || exit 0
+rm -f -- "$TX.tmp"
+if [[ "${1:---check}" == --recover ]]; then
+  # Volatile request remnants cannot justify erasing a durable completed result.
+  terminal=$(python3 - "$PUBLIC/status.json" <<'PYSTATE'
+import json,sys
+try:
+ x=json.load(open(sys.argv[1])); print('no' if x.get('state') in ('checking','downloading','backing_up','installing','verifying') else 'yes')
+except (OSError,ValueError): print('missing')
+PYSTATE
+)
+  if [[ "$terminal" == no ]]; then write_status interrupted '上次操作被中断；未开始的请求将重新处理'; fi
+  if [[ -e "$RUN/processing" ]]; then
+    rm -f -- "$RUN/processing"
+    [[ "$terminal" != missing ]] || write_status interrupted '临时请求被中断；请重新提交'
+  fi
+  # An inbox request remains owned by the path-trigger consumer, not recovery.
+  exit 0
+fi
+rm -f -- "$RUN/processing"
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
+normal_preflight
 
 ACTION=check
 EXPECTED=''
@@ -184,7 +237,10 @@ case "${1:---check}" in
   *) echo 'Unsupported worker argument' >&2; exit 2 ;;
 esac
 
-CURRENT=$(version_of "$BIN") || { echo 'Unable to identify binary version' >&2; exit 1; }
+HEADERS=$(curl --noproxy '*' -sS -D - -o /dev/null --max-time 4 http://127.0.0.1:8317/v8/management/config) || { echo 'Unable to contact running host' >&2; exit 1; }
+CURRENT=$(printf '%s' "$HEADERS" | python3 -c 'import re,sys; h=re.findall(r"(?im)^X-CPA-VERSION:[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*\r?$",sys.stdin.read()); print(h[0] if len(h)==1 else "")')
+[[ "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Unable to identify running version' >&2; exit 1; }
+[[ $(version_of "$BIN") == "$CURRENT" ]] || { echo 'Running and on-disk versions differ; manual review required' >&2; exit 1; }
 PHASE=checking
 write_status checking "正在查询官方 GitHub 最新正式版本"
 # Official GitHub endpoint only. No user-specified download URL or repository.
@@ -217,7 +273,7 @@ PHASE=preflight
 [[ "$EXPECTED" == "$LATEST" ]] || { echo 'Version approval mismatch' >&2; exit 1; }
 systemctl is-active --quiet "$SERVICE" || { echo 'CLIProxyAPI not currently active' >&2; exit 1; }
 # Sufficient headroom for download, binary and backup on a small VPS.
-for dir in "$APP" "$STATE" /var/tmp; do
+for dir in "$APP" "$STATE"; do
   free_kb=$(df -Pk "$dir" | awk 'NR==2{print $4}')
   [[ "$free_kb" =~ ^[0-9]+$ && "$free_kb" -ge 262144 ]] || {
     echo "Insufficient free space at $dir: ${free_kb:-unknown} KB" >&2; exit 1;
@@ -230,7 +286,7 @@ case "$(uname -m)" in
 esac
 ASSET="CLIProxyAPI_${LATEST#v}_linux_${ARCH}.tar.gz"
 RELEASE="https://github.com/router-for-me/CLIProxyAPI/releases/download/$LATEST"
-TMPDIR_UPD=$(mktemp -d /var/tmp/cliproxy-upd.XXXXXXXX)
+TMPDIR_UPD=$(mktemp -d "$STATE/cliproxy-upd.XXXXXXXX")
 PHASE=download
 write_status downloading "正在下载 $LATEST 并验证发布包 SHA256"
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fL --retry 2 \
@@ -274,6 +330,7 @@ if machine!=expected: raise SystemExit('ELF architecture mismatch')
 PYELF
 
 PHASE=backup
+python3 "$HELPER" verify-auth || { write_status error 'OAuth 目录核对失败或已改变，请检查并重新初始化更新服务'; exit 1; }
 # Bound backup storage even across repeated failures; never prune recovery material.
 usage=$(du -sk "$STATE/backups" | cut -f1)
 [[ "$usage" -le 1048576 ]] || { echo 'Backup retention budget exhausted; archive old backups manually' >&2; exit 1; }
@@ -287,10 +344,7 @@ BACKUP="$STATE/backups/$(date -u +%Y%m%d-%H%M%S)-${CURRENT}"
 mkdir -m 0700 "$BACKUP"
 write_status backing_up "正在备份旧程序、配置和 OAuth 数据"
 cp -a "$BIN" "$BACKUP/cli-proxy-api"
-items=(config.yaml)
-for name in auths plugins static; do [[ ! -e "$APP/$name" ]] || items+=("$name"); done
-tar -C "$APP" -czf "$BACKUP/runtime-config.tar.gz" "${items[@]}"
-chmod 0600 "$BACKUP/runtime-config.tar.gz"
+python3 "$HELPER" snapshot "$BACKUP/runtime-config.tar.gz"
 
 PHASE=install
 write_status installing "备份完成，正在安装 $LATEST（API 服务会短暂重启）"

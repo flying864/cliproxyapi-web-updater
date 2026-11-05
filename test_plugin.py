@@ -27,9 +27,11 @@ class Regression(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='cpa-plugin-test-')
         cls.sandbox = Path(cls.tmp.name)
         (cls.sandbox / 'inbox').mkdir()
+        (cls.sandbox / 'public').mkdir()
         so = cls.sandbox / 'plugin.so'
         subprocess.run(['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fPIC', '-shared',
                         '-DCPA_TEST', '-DCPA_RUN="' + str(cls.sandbox) + '"',
+                        '-DCPA_PUBLIC="' + str(cls.sandbox / 'public') + '"',
                         '-DCPA_STATUS_UID=' + str(os.getuid()), str(ROOT / 'cpa-updater.c'), '-o', str(so)], check=True)
         cls.lib = c.CDLL(str(so))
         cls.p = Plugin()
@@ -42,8 +44,10 @@ class Regression(unittest.TestCase):
 
     def setUp(self):
         for path in self.sandbox.iterdir():
-            if path.name not in ('inbox', 'plugin.so'):
+            if path.name not in ('inbox', 'public', 'plugin.so'):
                 path.unlink()
+        for path in (self.sandbox / 'public').iterdir():
+            path.unlink()
         for path in (self.sandbox / 'inbox').iterdir():
             path.unlink()
 
@@ -61,17 +65,28 @@ class Regression(unittest.TestCase):
         return r['StatusCode'], base64.b64decode(r['Body'])
 
     def ready(self, raw=None):
-        p = self.sandbox / 'status.json'
-        p.write_text(raw or '{"state":"ready","latest":"v8.0.56"}')
+        p = self.sandbox / 'public/status.json'
+        p.write_text(raw or '{"protocol":1,"worker_version":"0.5.0","state":"ready","latest":"v8.0.56"}')
         p.chmod(0o644)
 
     def test_metadata(self):
         m = self.invoke('plugin.register')['result']['metadata']
         self.assertEqual(m['GitHubRepository'], 'https://github.com/flying864/cliproxyapi-web-updater')
-        self.assertEqual(m['Version'], '0.4.0')
+        self.assertEqual(m['Version'], '0.5.0')
         self.assertEqual(self.p.abi_version, 1)
 
+    def test_setup_gate(self):
+        self.assertEqual(json.loads(self.http()[1])['state'], 'setup_required')
+        for action in ('check', 'update'):
+            self.assertEqual(self.http(action, 'POST')[0], 503)
+        for protocol in (None, 2, '1', True):
+            self.ready(json.dumps(dict(protocol=protocol, state='ready', latest='v8.0.56')))
+            self.assertEqual(json.loads(self.http()[1])['state'], 'needs_setup')
+            for action in ('check', 'update'):
+                self.assertEqual(self.http(action, 'POST')[0], 503)
+
     def test_full_routes(self):
+        self.ready()
         self.assertEqual(self.http()[0], 200)
         self.assertEqual(self.http('check', 'POST')[0], 202)
         self.assertEqual((self.sandbox / 'inbox/request').read_text(), 'check')
@@ -94,7 +109,7 @@ class Regression(unittest.TestCase):
 
     def test_status_properties(self):
         self.ready()
-        p = self.sandbox / 'status.json'
+        p = self.sandbox / 'public/status.json'
         p.chmod(0o666)
         self.assertEqual(self.http()[0],503)
         p.unlink()
@@ -102,11 +117,12 @@ class Regression(unittest.TestCase):
         self.assertEqual(self.http()[0],503)
         p.unlink()
         self.ready('{"nested":{"state":"ready","latest":"v8.0.56"}}')
-        self.assertEqual(self.http('update','POST',{'version':['v8.0.56']})[0],409)
+        self.assertEqual(self.http('update','POST',{'version':['v8.0.56']})[0],503)
         self.ready('{"state":"ready","latest":"v8.0.56","latest":"v8.0.57"}')
         self.assertEqual(self.http('update','POST',{'version':['v8.0.56']})[0],503)
 
     def test_concurrent_single_link(self):
+        self.ready()
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             codes = list(pool.map(lambda _: self.http('check','POST')[0], range(48)))
         self.assertEqual(codes.count(202),1)
@@ -118,16 +134,17 @@ class Regression(unittest.TestCase):
         self.assertEqual(len(list((self.sandbox / 'inbox').iterdir())),1)
 
     def test_processing_and_status_bounds(self):
+        self.ready()
         (self.sandbox / 'processing').write_text('check')
         self.assertEqual(self.http('check', 'POST')[0],409)
         (self.sandbox / 'processing').unlink()
         for raw in ('{} trailing', '{"state":"ready",}', '{"state":"ready" "latest":"v8.0.56"}', 'x' * 8193, ''):
-            p = self.sandbox / 'status.json'
+            p = self.sandbox / 'public/status.json'
             p.write_text(raw)
             p.chmod(0o644)
             self.assertEqual(self.http()[0],503)
         self.ready()
-        os.link(self.sandbox / 'status.json',self.sandbox / 'other')
+        os.link(self.sandbox / 'public/status.json',self.sandbox / 'other')
         self.assertEqual(self.http()[0],503)
 
     def test_nested_fields_are_not_dispatch(self):
@@ -138,7 +155,7 @@ class Regression(unittest.TestCase):
         for query in ({'nested':{'version':['v8.0.56']}}, {'version':[{'value':'v8.0.56'}]}):
             self.assertEqual(self.http('update','POST',query)[0],409)
         for v in ('v.0.56','v8..56','v8.0.','v8.0.56.1','v8.0.56\n','v'+'1'*40+'.0.1'):
-            self.ready(json.dumps({'state':'ready','latest':v}))
+            self.ready(json.dumps({'protocol':1,'state':'ready','latest':v}))
             self.assertEqual(self.http('update','POST',{'version':[v]})[0],409)
 
     def test_panel(self):

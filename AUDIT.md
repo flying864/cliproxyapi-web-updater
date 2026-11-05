@@ -1,5 +1,15 @@
 # 验证与边界
 
+## v0.5.0 简化一键更新
+
+两按钮 UI、最近状态持久化、协议初始化提示和重连恢复；没有新增任务中心、数据库或常驻服务。root 辅助代码只用于安全执行参数检查及降权归档，存放于固定 root libexec 路径。
+
+本地已执行官方 v8.0.56 测试子进程真实退出/重启并验证持久结果恢复；Node vm 执行真实嵌入脚本，模拟 POST 未送达、断线后重连及重复点击。集成测试并非生产主机升级。
+
+本机 AppArmor 限制跨 UID，worker 本地控制流使用明确的 snapshot 边界替身，真实降权归档用例在本机显式 skipped；不通过解除 AppArmor 来掩盖限制。GitHub CI 设置 `CPA_TEST_REAL_UID=1`，要求真实非 root 子进程读取配置/OAuth/plugins、root 控制输出并拒绝链接。CI 结果以精确 commit 运行记录为准。
+
+支持 `-config`/`--config` 及无歧义附加参数，不重写原主service。已有安全插件目录权限不变，Worker-only 安装不修改插件或重启主service。auth-dir由初始化API确认后固定root记录，每次升级前通过固定loopback API重新核对，变化时中止并要求重新初始化。自动回滚仍只恢复二进制。
+
 ## v0.4.0 商店格式修正
 
 保留下面 v0.3.0 的运行组件验证边界，业务权限和更新协议没有扩张。新增版本/权限/ZIP/应用回归和工作流依赖检查；main 与 tag 使用相同完整验证 job，双架构 job 加载最终生产库。Actions 成功与发布状态必须以精确 commit 的远端记录为准；源码推送不授权 tag/Release。

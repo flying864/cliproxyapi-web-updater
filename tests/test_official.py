@@ -29,6 +29,8 @@ def inside():
     shutil.copyfile('/library.so', app / 'plugins/cpa-updater.so')
     run = Path('/run/cliproxy-updater')
     (run / 'inbox').mkdir(parents=True)
+    public = Path('/var/lib/cliproxy-updater-status')
+    public.mkdir(parents=True)
     (app / 'config.yaml').write_text('''host: "127.0.0.1"
 port: 8317
 remote-management:
@@ -82,6 +84,8 @@ plugins:
                     time.sleep(.1)
             else:
                 raise AssertionError('Official server startup timeout')
+            auth_dir = request('/v8/management/config/oauth/auth-dir')
+            assert auth_dir['status'] == 200 and auth_dir['body'] == '/app/auths', auth_dir
             config = request('/v8/management/config/plugins')
             assert config['status'] == 200 and config['body']['enabled'] is True, config
             assert config['body']['configs']['cpa-updater']['enabled'] is True, config
@@ -92,7 +96,7 @@ plugins:
             plugin = plugins[0]
             assert plugin['registered'] is True and plugin['effective_enabled'] is True, plugin
             assert plugin['metadata']['github_repository'] == REPO, plugin
-            assert plugin['metadata']['version'] == '0.4.0', plugin
+            assert plugin['metadata']['version'] == '0.5.0', plugin
             panel = request('/v0/resource/plugins/cpa-updater/panel', auth=False)
             assert panel['status'] == 200 and panel['body']['html'], panel
             api = '/v0/management/plugins/cpa-updater'
@@ -100,14 +104,18 @@ plugins:
                 result = request(api + '/' + endpoint, method, auth=False)
                 assert result['status'] == 401, result
             result = request(api + '/status')
-            assert result['status'] == 200, result
+            assert result['status'] == 200 and result['body']['state'] == 'setup_required', result
+            for endpoint in ['/check', '/update?version=v8.0.56']:
+                result = request(api + endpoint, 'POST')
+                assert result['status'] == 503, result
+            (public / 'status.json').write_text(json.dumps({'protocol':1,'worker_version':'0.5.0','state':'idle','current':'8.0.55','latest':'unknown'}))
             result = request(api + '/check', 'POST')
             assert result['status'] == 202, result
             assert (run / 'inbox/request').read_text() == 'check'
             assert (run / 'inbox/request').stat().st_nlink == 1
             (run / 'inbox/request').unlink()
-            (run / 'status.json').write_text(json.dumps({
-                'state': 'ready', 'current': '8.0.55', 'latest': 'v8.0.56'}))
+            (public / 'status.json').write_text(json.dumps({
+                'protocol': 1, 'worker_version': '0.5.0', 'state': 'ready', 'current': '8.0.55', 'latest': 'v8.0.56'}))
             for query in ['', '?version=v8.0.55', '?version=v8.0.56&version=v8.0.57']:
                 result = request(api + '/update' + query, 'POST')
                 assert result['status'] in (400, 409), result
@@ -123,6 +131,21 @@ plugins:
             assert all(r['status'] in (202, 409) for r in concurrent), concurrent
             assert (run / 'inbox/request').read_text() == 'check'
             assert (run / 'inbox/request').stat().st_nlink == 1
+            (run / 'inbox/request').unlink()
+            final_status = dict(protocol=1, worker_version='0.5.0', state='success', current='8.0.56', latest='v8.0.56', detail='test fixture final result')
+            (public / 'status.json').write_text(json.dumps(final_status))
+            proc.terminate(); proc.wait(timeout=8)
+            # Same isolated filesystem: restart the genuine host, never a host service.
+            proc = subprocess.Popen(['/official', '--config', '/app/config.yaml', '--local-model'], cwd='/app', stdout=log, stderr=subprocess.STDOUT)
+            for _ in range(120):
+                try:
+                    result = request(api + '/status')
+                    if result['status'] == 200: break
+                except OSError: pass
+                time.sleep(.1)
+            else: raise AssertionError('restarted official host timeout')
+            assert result['body'] == dict(final_status, pending=False), result
+            print('PASS: persistent final status after real official child restart')
             print('PASS: official registration, repository/version metadata, panel, auth, full routes, '
                   'confirmed version and concurrent single-link queue')
         finally:

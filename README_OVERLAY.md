@@ -1,13 +1,5 @@
-# CPA Web Updater v0.4.0 源码/旧版补丁说明
+# 历史 v0.4.0 开发补丁
 
-当前仓库已经整合商店发布格式，无需再次运行 apply_to_repo.sh。
+v0.5.0 已包含运行组件更新，不再使用旧发布文件叠加方式。直接 clone 当前仓库，并按 README 安装或执行一次 `install.sh --worker-only`。
 
-如需为仍停留在原 v0.3.0 的干净 Git 根目录应用发布文件，可从此完整源码目录运行：
-
-```bash
-bash apply_to_repo.sh /path/to/clean-v0.3.0-checkout
-```
-
-脚本不会部署、发布或提交；正常异常尽力回滚，断电/强杀需人工复核。完整测试与发布流程见 STORE_PUBLISHING.md。
-
-代码推送不等于 Release，不等于官方登记合并，也不等于解决 root worker 和商店目录权限限制。
+`apply_to_repo.sh` 仍保留为历史工具，但从 v0.5.0 源码调用会在写文件前拒绝；不要绕过版本门禁把新旧 Worker/UI 混装。需要复现旧版补丁时使用固定 v0.4.0 commit。

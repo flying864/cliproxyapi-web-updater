@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared, one-shot installer transaction. No daemon or third-party modules."""
 import copy
+import importlib.util
 import fcntl
 import json
 import os
@@ -22,6 +23,8 @@ STATE = Path('/var/lib/cliproxy-updater')
 RUN = Path('/run/cliproxy-updater')
 SYSTEM = Path('/etc/systemd/system')
 WORKER = Path('/usr/local/libexec/cliproxy-updater-worker')
+RUNTIME = Path('/usr/local/libexec/cliproxy-updater-runtime.py')
+PUBLIC = Path('/var/lib/cliproxy-updater-status')
 TMPFILE = Path('/etc/tmpfiles.d/cliproxy-updater.conf')
 TRIGGERS = ['cliproxy-updater.path', 'cliproxy-updater-check.timer']
 SERVICES = ['cliproxy-updater.service', 'cliproxy-updater-check.service', 'cliproxy-updater-recover.service']
@@ -62,8 +65,77 @@ def ensure_directory(path, mode, gid=0):
 
 
 def plugin_directory(p):
-    p.mkdir(mode=0o755, exist_ok=True)
-    p.chmod(0o755)
+    safe_path(p.parent, True)
+    user = pwd.getpwnam('cliproxy')
+    gid = grp.getgrnam('cliproxy').gr_gid
+    if not os.path.lexists(p):
+        p.mkdir(mode=0o700)
+        os.chown(p, user.pw_uid, gid, follow_symlinks=False)
+    st = p.lstat()
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid not in (0, user.pw_uid) or
+            st.st_mode & 0o022 or (st.st_uid != 0 and st.st_gid != gid)):
+        raise RuntimeError('插件目录必须由 root 或 cliproxy 控制，且不能组/其他可写')
+    # Existing permissions and owner are deliberately not changed.
+
+
+def runtime_module():
+    spec = importlib.util.spec_from_file_location('trusted_runtime', Path(__file__).resolve().with_name('updater_runtime.py'))
+    if spec is None or spec.loader is None:
+        raise RuntimeError('缺少配套 updater_runtime.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def plugin_io(path, action, data=None):
+    """Untrusted plugin directory operations never execute with root privileges."""
+    directory = path.parent
+    plugin_directory(directory)
+    owner = directory.lstat().st_uid
+    user = pwd.getpwnam('cliproxy')
+    uid = 0 if owner == 0 else user.pw_uid
+    gid = 0 if owner == 0 else user.pw_gid
+    groups = [] if owner == 0 else os.getgrouplist('cliproxy', user.pw_gid)
+    code = r'''import os,sys,stat,tempfile
+from pathlib import Path
+p=Path(sys.argv[1]); action=sys.argv[2]
+fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+ if action=='read':
+  try: f=os.open(p.name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+  except FileNotFoundError: sys.exit(44)
+  with os.fdopen(f,'rb') as stream:
+   st=os.fstat(stream.fileno())
+   if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe plugin file')
+   sys.stdout.buffer.write(stream.read(20000001))
+ elif action=='write':
+  data=sys.stdin.buffer.read(20000001)
+  if len(data)>20000000: raise ValueError('oversized plugin')
+  name='.cpa-updater-'+os.urandom(12).hex()
+  f=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o755,dir_fd=fd)
+  try:
+   with os.fdopen(f,'wb') as out: out.write(data);out.flush();os.fsync(out.fileno());os.fchmod(out.fileno(),0o755)
+   os.replace(name,p.name,src_dir_fd=fd,dst_dir_fd=fd);os.fsync(fd)
+  finally:
+   try:os.unlink(name,dir_fd=fd)
+   except FileNotFoundError:pass
+ elif action=='delete':
+  try:os.unlink(p.name,dir_fd=fd);os.fsync(fd)
+  except FileNotFoundError:pass
+ else:raise ValueError('unknown action')
+finally:os.close(fd)
+'''
+    result = subprocess.run([sys.executable, '-I', '-c', code, str(path), action],
+                            input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            timeout=20, user=None if uid == os.geteuid() else uid,
+                            group=None if gid == os.getegid() else gid,
+                            extra_groups=None if uid == os.geteuid() and gid == os.getegid() else groups)
+    if result.returncode == 44 and action == 'read':
+        return None
+    if result.returncode:
+        raise RuntimeError('插件文件操作失败（未以 root 进入服务用户可写目录）')
+    return result.stdout
+
 
 
 def readable_by_service(path):
@@ -96,15 +168,12 @@ def validate_service():
     if ctl('show', 'cliproxyapi.service', '-p', 'User', '--value') != 'cliproxy' or ctl('show', 'cliproxyapi.service', '-p', 'Group', '--value') != 'cliproxy':
         raise RuntimeError('主服务必须明确 User=cliproxy Group=cliproxy')
     value = ctl('show', 'cliproxyapi.service', '-p', 'ExecStart', '--value')
-    # systemctl's structured ExecStart representation, not substring matching.
-    match = re.fullmatch(r'\{ path=/opt/cliproxyapi/cli-proxy-api ; argv\[\]=([^;]+) ; .*\}', value)
-    if not match or match[1].strip().split() != ['/opt/cliproxyapi/cli-proxy-api', '-config', '/opt/cliproxyapi/config.yaml']:
-        raise RuntimeError('ExecStart 必须精确使用固定程序及 -config /opt/cliproxyapi/config.yaml')
+    runtime_module().validate_exec(value)
     for p in [APP, APP / 'cli-proxy-api', Path('/usr/local/libexec'), SYSTEM, Path('/etc/tmpfiles.d')]:
         safe_path(p)
     validate_config_permissions(APP / 'config.yaml')
     if (APP / 'plugins').exists() or (APP / 'plugins').is_symlink():
-        safe_path(APP / 'plugins', True)
+        plugin_directory(APP / 'plugins')
     for p in [APP, APP / 'config.yaml', APP / 'cli-proxy-api']:
         readable_by_service(p)
     if not query('is-active', 'cliproxyapi.service'):
@@ -189,8 +258,8 @@ def units():
         if not recover:
             head += 'OnFailure=cliproxy-updater-recover.service\n'
         body = '[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/libexec/cliproxy-updater-worker ' + mode + '\n'
-        body += f'TimeoutStartSec={timeout}\nTimeoutStopSec=180\nMemoryMax=768M\nTasksMax=64\nLimitNOFILE=256\n'
-        body += 'PrivateTmp=true\nNoNewPrivileges=true\nProtectSystem=strict\nReadWritePaths=/opt/cliproxyapi /var/lib/cliproxy-updater /run/cliproxy-updater\nProtectHome=true\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n'
+        body += f'TimeoutStartSec={timeout}\nTimeoutStopSec=180\nMemoryMax=384M\nTasksMax=64\nLimitNOFILE=256\n'
+        body += 'PrivateTmp=true\nNoNewPrivileges=true\nProtectSystem=strict\nReadWritePaths=/opt/cliproxyapi /var/lib/cliproxy-updater /var/lib/cliproxy-updater-status /run/cliproxy-updater\nProtectHome=read-only\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n'
         if recover:
             body += '[Install]\nWantedBy=multi-user.target\n'
         result['cliproxy-updater.' + suffix if suffix == 'service' else 'cliproxy-updater-' + suffix] = head + body
@@ -232,7 +301,46 @@ def restore_triggers(states):
             raise RuntimeError('触发器恢复验证失败: ' + u)
 
 
-def run(installing):
+def deployment_config(api):
+    value = api.request('/v8/management/config/oauth/auth-dir')
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError('无法取得实际 auth-dir；拒绝猜测备份路径')
+    user = pwd.getpwnam('cliproxy')
+    if value == '~' or value.startswith('~/'):
+        value = user.pw_dir + value[1:]
+    path = Path(value)
+    if not path.is_absolute():
+        working = ctl('show', 'cliproxyapi.service', '-p', 'WorkingDirectory', '--value')
+        if not working or not Path(working).is_absolute():
+            raise RuntimeError('相对 auth-dir 需要明确 WorkingDirectory')
+        path = Path(working) / path
+    if '..' in path.parts or path == Path('/'):
+        raise RuntimeError('auth-dir 路径不安全')
+    for part in [*reversed(path.parents), path]:
+        if part.is_symlink():
+            raise RuntimeError('auth-dir 或祖先不得为符号链接')
+    if not path.is_dir():
+        raise RuntimeError('auth-dir 目录不存在')
+    readable_by_service(path)
+    return {'protocol': 1, 'auth_dir': str(path)}
+
+
+def initialize_status():
+    target = PUBLIC / 'status.json'
+    if target.exists():
+        st = target.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_nlink != 1 or st.st_mode & 0o022:
+            raise RuntimeError('不安全的持久状态文件')
+        value = json.loads(target.read_text())
+        if value.get('protocol') == 1:
+            return
+    data = json.dumps(dict(protocol=1, worker_version=runtime_module().WORKER_VERSION, state='idle',
+        detail='更新服务已初始化，点击检查更新', current='unknown', latest='unknown'), ensure_ascii=False).encode()
+    atomic_write(target, data, 0o640)
+    os.chown(target, 0, grp.getgrnam('cliproxy').gr_gid, follow_symlinks=False)
+
+
+def run(installing, worker_only=False):
     if os.geteuid() != 0:
         raise RuntimeError('必须 root 执行')
     os.umask(0o077)
@@ -242,9 +350,10 @@ def run(installing):
     if discovered.get('plugins_dir') != str(APP / 'plugins'):
         raise RuntimeError('插件目录不匹配')
     here = Path(__file__).resolve().parent
+    approved_deployment = deployment_config(api) if installing else None
     with tempfile.TemporaryDirectory(prefix='cpa-installer-') as build:
         compiled = Path(build) / 'cpa-updater.so'
-        if installing:
+        if installing and not worker_only:
             command('gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fPIC', '-shared', str(here / 'cpa-updater.c'), '-o', str(compiled))
         ensure_directory(STATE, 0o700)
         lock = STATE / 'lock'
@@ -274,12 +383,20 @@ def run(installing):
                     ensure_directory(STATE / 'backups', 0o700)
                     ensure_directory(RUN, 0o750, grp.getgrnam('cliproxy').gr_gid)
                     ensure_directory(RUN / 'inbox', 0o730, grp.getgrnam('cliproxy').gr_gid)
-                    command('bash', str(here / 'cliproxy-updater-worker'), '--preflight')
+                    ensure_directory(PUBLIC, 0o750, grp.getgrnam('cliproxy').gr_gid)
                 before = api.config()
-                after = plan_config(before, installing)
-                paths = [APP / 'plugins/cpa-updater.so', WORKER, TMPFILE] + [SYSTEM / u for u in units()]
+                after = before if worker_only else plan_config(before, installing)
+                plugin_path = APP / 'plugins/cpa-updater.so'
+                if not worker_only:
+                    plugin_directory(plugin_path.parent)
+                paths = [WORKER, RUNTIME, TMPFILE, STATE / 'deployment.json', PUBLIC / 'status.json'] + [SYSTEM / u for u in units()]
+                if not worker_only:
+                    paths.insert(0, plugin_path)
                 for p in paths:
-                    if p.exists() or p.is_symlink():
+                    if not worker_only and p == plugin_path:
+                        data = plugin_io(p, 'read')
+                        snapshots[p] = None if data is None else (data, 0o755)
+                    elif p.exists() or p.is_symlink():
                         safe_path(p)
                         snapshots[p] = (p.read_bytes(), stat.S_IMODE(p.stat().st_mode))
                     else:
@@ -292,17 +409,23 @@ def run(installing):
                 shutil.copy2(APP / 'config.yaml', backup / 'config.yaml')
                 changed = True
                 if installing:
-                    plugin_directory(APP / 'plugins')
-                    atomic_write(APP / 'plugins/cpa-updater.so', compiled.read_bytes(), 0o755)
+                    if not worker_only:
+                        plugin_io(plugin_path, 'write', compiled.read_bytes())
+                    atomic_write(RUNTIME, (here / 'updater_runtime.py').read_bytes(), 0o644)
+                    atomic_write(STATE / 'deployment.json', json.dumps(approved_deployment).encode(), 0o600)
                     atomic_write(WORKER, (here / 'cliproxy-updater-worker').read_bytes(), 0o755)
+                    command(str(WORKER), '--preflight')
+                    initialize_status()
                     for name, text in units().items():
                         atomic_write(SYSTEM / name, text.encode(), 0o644)
-                    atomic_write(TMPFILE, b'd /var/lib/cliproxy-updater 0700 root root - -\nd /var/lib/cliproxy-updater/backups 0700 root root - -\nd /run/cliproxy-updater 0750 root cliproxy - -\nd /run/cliproxy-updater/inbox 0730 root cliproxy - -\n', 0o644)
+                    atomic_write(TMPFILE, b'd /var/lib/cliproxy-updater 0700 root root - -\nd /var/lib/cliproxy-updater/backups 0700 root root - -\nd /var/lib/cliproxy-updater-status 0750 root cliproxy - -\nd /run/cliproxy-updater 0750 root cliproxy - -\nd /run/cliproxy-updater/inbox 0730 root cliproxy - -\n', 0o644)
                     command('systemd-tmpfiles', '--create', '/etc/tmpfiles.d/cliproxy-updater.conf')
-                    readable_by_service(APP / 'plugins/cpa-updater.so')
+                    if not worker_only:
+                        readable_by_service(plugin_path)
                 # Write the private entry first, global last. Never overwrite unrelated config.
-                api.put('configs/cpa-updater', after['configs']['cpa-updater'])
-                if before.get('enabled') != after.get('enabled'):
+                if not worker_only:
+                    api.put('configs/cpa-updater', after['configs']['cpa-updater'])
+                if not worker_only and before.get('enabled') != after.get('enabled'):
                     api.put('enabled', after['enabled'])
                 if api.config() != after:
                     raise RuntimeError('配置写入未实际生效或发生并发修改')
@@ -313,10 +436,19 @@ def run(installing):
                     if ctl('show', 'cliproxy-updater-recover.service', '-p', 'LoadState', '--value') != 'not-found':
                         ctl('disable', 'cliproxy-updater-recover.service')
                     for p in paths:
-                        p.unlink(missing_ok=True)
+                        if p == plugin_path:
+                            plugin_io(p, 'delete')
+                        elif p in (STATE / 'deployment.json', PUBLIC / 'status.json'):
+                            continue
+                        else:
+                            p.unlink(missing_ok=True)
+                    if PUBLIC.exists():
+                        atomic_write(PUBLIC / 'status.json', json.dumps(dict(protocol=0, state='setup_required', detail='更新服务已卸载')).encode(), 0o640)
+                        os.chown(PUBLIC / 'status.json', 0, grp.getgrnam('cliproxy').gr_gid)
                 ctl('daemon-reload')
-                ctl('restart', 'cliproxyapi.service')
-                health(api, installing)
+                if not worker_only:
+                    ctl('restart', 'cliproxyapi.service')
+                health(api, None if worker_only else installing)
                 if installing:
                     ctl('enable', 'cliproxy-updater-recover.service')
                     for u in TRIGGERS:
@@ -330,10 +462,14 @@ def run(installing):
                     assert before is not None and after is not None
                     for p, old in snapshots.items():
                         try:
-                            if old is None:
+                            if p == plugin_path:
+                                plugin_io(p, 'delete' if old is None else 'write', None if old is None else old[0])
+                            elif old is None:
                                 p.unlink(missing_ok=True)
                             else:
                                 atomic_write(p, *old)
+                                if p == PUBLIC / 'status.json':
+                                    os.chown(p, 0, grp.getgrnam('cliproxy').gr_gid)
                         except Exception:
                             failures.append('文件恢复失败: ' + str(p))
                     # Restore service independently: a dead API must not prevent
@@ -343,14 +479,15 @@ def run(installing):
                     except Exception:
                         failures.append('恢复旧 unit 后 daemon-reload 失败')
                     try:
-                        ctl('restart', 'cliproxyapi.service')
+                        if not worker_only:
+                            ctl('restart', 'cliproxyapi.service')
                         health(api, None)
                     except Exception:
                         failures.append('旧服务启动/健康恢复未通过')
                     try:
                         # Only restore fields still equal to our intended value or original.
                         current = api.config()
-                        for field in ['configs', 'enabled']:
+                        for field in ([] if worker_only else ['configs', 'enabled']):
                             if field == 'configs':
                                 own = current.get('configs', {}).get('cpa-updater')
                                 original = before.get('configs', {}).get('cpa-updater')
@@ -384,7 +521,9 @@ if __name__ == '__main__':
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, interrupted)
     try:
-        run(sys.argv[1] == 'install')
+        if len(sys.argv) not in (2, 3) or sys.argv[1] not in ('install', 'uninstall') or (len(sys.argv) == 3 and (sys.argv[1] != 'install' or sys.argv[2] != '--worker-only')):
+            raise RuntimeError('用法: install.sh [--worker-only] 或 uninstall.sh')
+        run(sys.argv[1] == 'install', worker_only=len(sys.argv) == 3)
     except BaseException as exc:
         # Never print HTTP payloads, headers, credentials, or subprocess output.
         print('安装/卸载中止: ' + (str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__), file=sys.stderr)

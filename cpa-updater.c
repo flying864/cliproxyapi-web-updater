@@ -24,35 +24,39 @@ typedef struct { uint32_t abi_version; plugin_call_fn call; plugin_free_fn free_
 
 #ifndef CPA_TEST
 #undef CPA_RUN
+#undef CPA_PUBLIC
 #undef CPA_STATUS_UID
 #define CPA_RUN "/run/cliproxy-updater"
 #define CPA_STATUS_UID 0
+#define CPA_PUBLIC "/var/lib/cliproxy-updater-status"
 #endif
 #define REQUEST_FILE CPA_RUN "/inbox/request"
 #define PROCESSING_FILE CPA_RUN "/processing"
-#define STATUS_FILE CPA_RUN "/status.json"
+#define STATUS_FILE CPA_PUBLIC "/status.json"
 
 static const char *html =
-"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
-"<title>CLIProxyAPI 更新</title><style>body{font:15px system-ui,sans-serif;max-width:760px;margin:35px auto;padding:0 16px;line-height:1.7;color:#17212e}"
-".card{border:1px solid #d3dbe7;border-radius:12px;padding:20px;margin:15px 0}button{border:0;border-radius:8px;background:#1456b8;color:#fff;padding:11px 16px;cursor:pointer;margin-right:8px}"
-"button.danger{background:#0a743e}input{padding:10px;width:min(440px,95%);border:1px solid #ccd3dc;border-radius:8px}pre{white-space:pre-wrap;word-break:break-word}"
-"small{color:#667}p{margin:8px 0}</style></head><body>"
-"<h2>CLIProxyAPI 一键更新</h2><p>检查官方正式版并确认版本后升级；自动校验 SHA256 并尝试二进制故障回滚（不回滚 OAuth 数据）。升级时会短暂中断 API 服务。</p>"
-"<div class='card'><label for='key'>管理密钥（仅在本页面内存中使用，不保存到浏览器）</label><p><input id='key' type='password' autocomplete='off' placeholder='CLIProxyAPI Management Key'></p>"
-"<p><button id='status'>读取状态</button><button id='check'>检查版本</button><button id='update' class='danger'>一键升级正式版</button></p></div>"
-"<div class='card'><p>本机版本：<strong id='current'>—</strong></p><p>最新版本：<strong id='latest'>—</strong></p>"
-"<p>任务状态：<strong id='state'>—</strong></p><p>更新时间：<span id='when'>—</span></p><pre id='detail'></pre></div>"
-"<small>主程序自动升级已关闭，仅每周检查。升级操作需 Management Key。请通过 HTTPS 或 SSH 转发访问；升级进行时页面可能暂时断线。</small>"
-"<script>const api='/v0/management/plugins/cpa-updater';const el=id=>document.getElementById(id);"
-"async function call(s,method='GET'){const key=el('key').value.trim();if(!key){el('detail').textContent='请先输入管理密钥';return;}"
-"try{const r=await fetch(api+s,{method,cache:'no-store',credentials:'omit',headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'}});"
-"const t=await r.text();let j;try{j=JSON.parse(t)}catch{throw Error('HTTP '+r.status+' '+t.slice(0,160))}if(!r.ok)throw Error(j.error||j.detail||'HTTP '+r.status);"
-"if(s==='/status'){el('current').textContent=j.current||'—';el('latest').textContent=j.latest||'—';el('state').textContent=j.state||'—';el('when').textContent=j.updated_at||'—';el('detail').textContent=j.detail||'';}"
-"else{el('detail').textContent=j.message||'任务已提交';setTimeout(()=>call('/status'),1200)}}catch(e){el('detail').textContent=String(e)}}"
-"el('status').onclick=()=>call('/status');el('check').onclick=()=>call('/check','POST');"
-"el('update').onclick=()=>{const v=el('latest').textContent;if(el('state').textContent!=='ready'||!/^v[0-9]+[.][0-9]+[.][0-9]+$/.test(v)){el('detail').textContent='请先点击检查版本，确认有新版本';return;}if(confirm('确认将 CLIProxyAPI 升级至 '+v+'？升级将短暂断开 Hermes 等所有 API 客户端。'))call('/update?version='+encodeURIComponent(v),'POST')};"
-"setInterval(()=>{if(el('key').value)call('/status')},7000);</script></body></html>";
+"<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>CLIProxyAPI 更新</title><style>body{font:16px system-ui;max-width:720px;margin:40px auto;padding:16px;line-height:1.7}button,input{padding:12px;margin:6px}pre{white-space:pre-wrap;overflow-wrap:anywhere}button:disabled{opacity:.5}</style></head><body><h2>CLIProxyAPI 一键更新</h2><p>升级会短暂中断 API；失败尝试恢复旧二进制，不恢复配置和 OAuth。</p><label>管理密钥（仅页面内存）<input id='key' type='password' autocomplete='off'></label><p><button id='check' disabled>检查版本</button><button id='update' disabled>立即更新</button></p><p id='connection' role='status'>请输入管理密钥，自动读取状态</p><p>当前版本：<strong id='current'>—</strong> / 最新版本：<strong id='latest'>—</strong> <a id='release' hidden target='_blank' rel='noopener noreferrer'>官方更新日志</a></p><p>最近状态：<strong id='state'>—</strong> <span id='when'></span></p><pre id='detail'></pre><script>"
+"const api='/v0/management/plugins/cpa-updater',el=id=>document.getElementById(id);"
+"let last=null,inflight=false,online=false,waiting=false,uncertain=false,baseline='',timer=null;"
+"const version=v=>typeof v==='string'&&v.length<40&&/^v[0-9]+[.][0-9]+[.][0-9]+$/.test(v);"
+"const terminal=new Set(['idle','ready','current','needs_recheck','up_to_date','success','error','failed','rollback_failed','rolled_back','interrupted','setup_required','needs_setup']);"
+"const signature=j=>JSON.stringify([j.state,j.updated_at,j.detail,j.current,j.latest]);"
+"function buttons(){const enabled=!!el('key').value.trim()&&online&&!inflight&&!waiting&&last&&last.pending!==true&&last.protocol===1&&terminal.has(last.state)&&!['setup_required','needs_setup'].includes(last.state);el('check').disabled=!enabled;el('update').disabled=!(enabled&&last.state==='ready'&&version(last.latest));}"
+"function render(j){last=j;for(const [id,key] of [['current','current'],['latest','latest'],['state','state'],['when','updated_at'],['detail','detail']])el(id).textContent=typeof j[key]==='string'?j[key]:'—';const link=el('release');link.hidden=!version(j.latest);if(!link.hidden)link.href='https://github.com/router-for-me/CLIProxyAPI/releases/tag/'+j.latest;else link.removeAttribute('href');}"
+"function schedule(){clearTimeout(timer);timer=setTimeout(()=>request('/status'),2000);}"
+"async function request(path,method='GET'){"
+" if(inflight)return;const key=el('key').value.trim();if(!key){buttons();return;}"
+" inflight=true;buttons();"
+" const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);"
+" try{const r=await fetch(api+path,{method,signal:controller.signal,cache:'no-store',credentials:'omit',headers:{Authorization:'Bearer '+key}});const j=await r.json();if(!r.ok){online=false;el('connection').textContent='HTTP '+r.status+'：'+(j.error||'请求未被接受');if(method==='POST')waiting=false;return;}"
+" online=true;el('connection').textContent='已连接';"
+" if(method==='GET'){if(waiting&&(signature(j)!==baseline||(uncertain&&j.pending===false&&terminal.has(j.state)))){waiting=false;uncertain=false;}render(j);}else{el('connection').textContent='请求已提交，等待状态更新';}"
+" }catch(e){if(method==='POST')uncertain=true;online=false;el('connection').textContent='连接中断，正在重连；操作结果以恢复后的状态为准';}"
+" finally{clearTimeout(timeout);inflight=false;buttons();schedule();}"
+"}"
+"function submit(action){if(el(action).disabled||inflight||waiting)return;const v=last.latest;if(action==='update'&&!confirm('确认升级至 '+v+'？API 将短暂断开。'))return;waiting=true;uncertain=false;baseline=signature(last);buttons();request(action==='check'?'/check':'/update?version='+encodeURIComponent(v),'POST');}"
+"el('check').onclick=()=>submit('check');el('update').onclick=()=>submit('update');el('key').oninput=()=>{buttons();if(!inflight){clearTimeout(timer);request('/status');}};buttons();request('/status');"
+"</script></body></html>";
 
 static const char enc[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static char *base64(const uint8_t *b, size_t n){
@@ -171,19 +175,35 @@ static int read_status(char *buf,size_t cap){
   document d;if(n!=(size_t)st.st_size || !parse(&d,buf,n))return -1;
   return (int)n;
 }
+static int compatible(const char *buf,int n){
+  document d;if(n<=0 || !parse(&d,buf,(size_t)n))return 0;
+  int i=member(&d,0,"protocol");
+  return i>=0 && d.t[i].type==JSMN_PRIMITIVE && d.t[i].end-d.t[i].start==1 && buf[d.t[i].start]=='1';
+}
 static int get_status(cliproxy_buffer *r){
   char buf[8194];int n=read_status(buf,sizeof(buf));
   if(n<0)return send_error(r,503,"无效状态文件");
-  return deliver(r,200,"application/json; charset=utf-8",n?buf:"{\"state\":\"initializing\",\"detail\":\"尚未完成首次版本检查\"}");
+  if(!n)return deliver(r,200,"application/json; charset=utf-8","{\"state\":\"setup_required\",\"detail\":\"请先初始化更新组件\"}");
+  if(!compatible(buf,n))return deliver(r,200,"application/json; charset=utf-8","{\"state\":\"needs_setup\",\"detail\":\"更新组件协议不兼容，请重新初始化\"}");
+  /* Derived queue hint; no task system or extra persistent record. */
+  struct stat st;int pending=0;
+  if(lstat(REQUEST_FILE,&st)==0)pending=1;else if(errno!=ENOENT)pending=1;
+  if(lstat(PROCESSING_FILE,&st)==0)pending=1;else if(errno!=ENOENT)pending=1;
+  size_t end=(size_t)n;while(end&&strchr(" \t\r\n",buf[end-1]))end--;
+  if(!end||buf[end-1]!='}')return send_error(r,503,"无效状态对象");
+  char result[8256];memcpy(result,buf,end-1);
+  snprintf(result+end-1,sizeof(result)-(end-1),",\"pending\":%s}",pending?"true":"false");
+  return deliver(r,200,"application/json; charset=utf-8",result);
 }
 static int queue_job(cliproxy_buffer *r,const char *action,const char *expected){
+  char status[8194];int status_n=read_status(status,sizeof(status));
+  if(!compatible(status,status_n))return send_error(r,503,"请先初始化兼容的更新组件");
   char task[64];
   if(!strcmp(action,"update")){
     if(!expected || !valid_version(expected))return send_error(r,409,"缺少或无效的确认版本");
-    char status[8194],state[32],latest[40];int n=read_status(status,sizeof(status));
-    if(n<0)return send_error(r,503,"状态异常");
+    char state[32],latest[40];
     document d;
-    if(!n || !parse(&d,status,(size_t)n) || !field(&d,"state",state,sizeof(state)) || strcmp(state,"ready") ||
+    if(!parse(&d,status,(size_t)status_n) || !field(&d,"state",state,sizeof(state)) || strcmp(state,"ready") ||
        !field(&d,"latest",latest,sizeof(latest)) || !valid_version(latest) || strcmp(latest,expected))
       return send_error(r,409,"版本已变化，请重新检查并确认");
     snprintf(task,sizeof(task),"update %s",expected);
@@ -206,7 +226,7 @@ static int queue_job(cliproxy_buffer *r,const char *action,const char *expected)
 static int plugin_call(char *method,uint8_t *req,size_t len,cliproxy_buffer *response){
   response->ptr=NULL;response->len=0;
   if(!strcmp(method,"plugin.register")||!strcmp(method,"plugin.reconfigure"))
-    return respond(response,"{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{\"Name\":\"CPA Web Updater\",\"Version\":\"0.4.0\",\"Author\":\"Local deployment\",\"GitHubRepository\":\"https://github.com/flying864/cliproxyapi-web-updater\",\"Logo\":\"\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}}");
+    return respond(response,"{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{\"Name\":\"CPA Web Updater\",\"Version\":\"0.5.0\",\"Author\":\"Local deployment\",\"GitHubRepository\":\"https://github.com/flying864/cliproxyapi-web-updater\",\"Logo\":\"\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}}");
   if(!strcmp(method,"management.register"))
     return respond(response,"{\"ok\":true,\"result\":{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/cpa-updater/status\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/check\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/update\"}],\"resources\":[{\"Path\":\"/panel\",\"Menu\":\"CPA 一键更新\",\"Description\":\"检查版本、安装更新和回滚\"}]}}");
   if(strcmp(method,"management.handle"))return respond(response,"{\"ok\":false,\"error\":{\"code\":\"unknown_method\",\"message\":\"Unknown plugin method\"}}");

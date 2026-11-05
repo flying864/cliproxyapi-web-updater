@@ -41,10 +41,13 @@ jobs:
           done
           python3 -B test_plugin.py
           python3 -B tests/test_sanitizer.py
+          node tests/test_panel.js
       - name: Isolated worker and installer regressions
         run: |
-          sudo python3 -B tests/test_worker.py
-          sudo python3 -B tests/test_install.py
+          sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_worker.py
+          sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_install.py
+          python3 -B tests/test_simple_install.py
+          sudo python3 -B tests/test_runtime.py
       - name: Pinned official host integration
         run: |
           mkdir -p test-output

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Keep a two-action Web UI: check, confirm update, and automatic reconnect to the last result.
+- Preserve existing `--config`/`-config` service arguments and safe service-owned plugin directory permissions.
+- Add worker-only initialization without replacing the plugin or restarting the main service.
+- Persist public status separately from root-private backups and reject missing/incompatible worker protocol.
+- Approve the actual OAuth directory once and read runtime backup data without root privileges.
+- Strengthen readiness with the running host version and a stable service observation window.
+- No task center, history UI, notification service, database, automatic upgrade or runtime framework.
+
 ## 0.4.0
 
 - Add official-store schema v1 registry and native amd64/arm64 ZIP packaging.

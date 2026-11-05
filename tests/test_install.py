@@ -20,7 +20,7 @@ def load():
 class InstallTests(unittest.TestCase):
     def test_isolated_entrypoints(self):
         from install_sandbox import run
-        for scenario in ['preflight-missing', 'success', 'api', 'registered', 'trigger', 'identity', 'lock']:
+        for scenario in ['preflight-missing', 'success', 'api', 'registered', 'trigger', 'identity', 'lock', 'worker-only']:
             with self.subTest(scenario=scenario):
                 result = run(scenario)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -57,8 +57,11 @@ class InstallTests(unittest.TestCase):
         m = load()
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / 'plugins'
-            m.plugin_directory(p)
-            self.assertEqual(p.stat().st_mode & 0o777, 0o755)
+            p.mkdir(mode=0o700)
+            user=mock.Mock(pw_uid=p.stat().st_uid)
+            with mock.patch.object(m, 'safe_path'), mock.patch.object(m.pwd, 'getpwnam', return_value=user), mock.patch.object(m.grp, 'getgrnam', return_value=mock.Mock(gr_gid=p.stat().st_gid)):
+                m.plugin_directory(p)
+            self.assertEqual(p.stat().st_mode & 0o777, 0o700)
 
     def test_unregistered_rejected(self):
         m = load()
@@ -106,6 +109,8 @@ class InstallTests(unittest.TestCase):
             m.RUN = root / 'run'; m.RUN.mkdir()
             m.SYSTEM = root / 'system'; m.SYSTEM.mkdir()
             m.WORKER = root / 'worker'
+            m.RUNTIME = root / 'runtime.py'
+            m.PUBLIC = root / 'public'; m.PUBLIC.mkdir()
             m.TMPFILE = root / 'tmpfiles.conf'
             original = {'enabled': True, 'configs': {'cpa-updater': {'enabled': True, 'priority': 4}}}
             class FixtureAPI:
@@ -136,7 +141,7 @@ class InstallTests(unittest.TestCase):
                 if failure == 'health' and installed is False:
                     raise RuntimeError('fixture health failure')
             with contextlib.ExitStack() as stack:
-                for name, value in [('ensure_directory', lambda *a: None), ('validate_service', lambda: None), ('safe_path', lambda *a: None), ('API', lambda: api), ('ctl', ctl), ('query', lambda *a: False), ('health', health)]:
+                for name, value in [('plugin_directory', lambda *a: None), ('plugin_io', lambda *a: None), ('ensure_directory', lambda *a: None), ('validate_service', lambda: None), ('safe_path', lambda *a: None), ('API', lambda: api), ('ctl', ctl), ('query', lambda *a: False), ('health', health)]:
                     stack.enter_context(mock.patch.object(m, name, value))
                 real_fstat = os.fstat
                 def fixture_stat(fd):
@@ -146,6 +151,8 @@ class InstallTests(unittest.TestCase):
                     return os.stat_result(values)
                 stack.enter_context(mock.patch.object(m.os, 'fstat', fixture_stat))
                 stack.enter_context(mock.patch.object(m.os, 'geteuid', return_value=0))
+                stack.enter_context(mock.patch.object(m.os, 'chown'))
+                stack.enter_context(mock.patch.object(m.grp, 'getgrnam', return_value=mock.Mock(gr_gid=os.getgid())))
                 stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
                 with self.assertRaises((RuntimeError, BlockingIOError)):
                     m.run(False)

@@ -60,7 +60,7 @@ def main():
     parser.add_argument('version')
     args = parser.parse_args()
     bump(args.version)
-    print(f'Updated five version markers to {args.version}')
+    print(f'Updated version markers to {args.version}')
 
 
 if __name__ == '__main__':

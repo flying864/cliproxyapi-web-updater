@@ -29,7 +29,8 @@ class VersionTests(unittest.TestCase):
             with self.subTest(value=value):
                 path = self.root / 'README.md'
                 original = (ROOT / 'README.md').read_text()
-                path.write_text(original.replace('v0.3.0', 'v' + value).replace('v0.4.0', 'v' + value))
+                current = check.source_versions(ROOT)['README.md']
+                path.write_text(original.replace('# CPA Web Updater v' + current, '# CPA Web Updater v' + value, 1))
                 with self.assertRaises(ValueError):
                     check.source_versions(self.root)
 

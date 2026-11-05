@@ -59,6 +59,7 @@ def main():
         subprocess.run(['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
                         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                         '-DCPA_TEST', '-DCPA_RUN="' + str(temp / 'private-state') + '"',
+                        '-DCPA_PUBLIC="' + str(temp / 'private-public') + '"',
                         '-DCPA_STATUS_UID=0', '-I', str(ROOT), str(harness), '-o', str(binary)],
                        check=True, timeout=30)
         subprocess.run([str(binary)], check=True, timeout=45)

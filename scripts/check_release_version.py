@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the five explicit stable-version markers; no network or writes."""
+"""Check the six explicit stable-version markers; no network or writes."""
 import argparse
 from pathlib import Path
 import re
@@ -12,6 +12,7 @@ PATTERNS = {
     "test_plugin.py": re.compile(r"\['Version'\],\s*'([^']*)'"),
     "README.md": re.compile(r'^# CPA Web Updater v([^\r\n]*)$', re.M),
     "cliproxy-updater-worker": re.compile(r'^# CPA Web Updater v([^\r\n:]*): fixed, verified official stable releases only\.$', re.M),
+    "updater_runtime.py": re.compile(r"^WORKER_VERSION = '([^']*)'$", re.M),
     "tests/test_official.py": re.compile(r"plugin\['metadata'\]\['version'\] == '([^']*)'"),
 }
 

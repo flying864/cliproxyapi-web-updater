@@ -2,18 +2,27 @@
 import hashlib, json, os, subprocess, tarfile, tempfile, unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-# Keep fixtures alive for the entire module; tempfile honors the caller's TMPDIR.
+# Multi-UID DAC needs privileged bwrap; tests never change host confinement.
 _TEMP=tempfile.TemporaryDirectory(prefix='cpa-worker-')
 BASE=Path(_TEMP.name)
 SCRATCH=BASE
 SCRATCH.mkdir(parents=True,exist_ok=True)
 SOURCE=ROOT
+REAL_UID = os.environ.get('CPA_TEST_REAL_UID') == '1'
 MOCKS={
+'runuser':r'''#!/usr/bin/python3
+import os,pwd,sys
+u=pwd.getpwnam(sys.argv[2])
+if u.pw_uid != os.geteuid(): os.setgroups([]); os.setgid(u.pw_gid); os.setuid(u.pw_uid)
+os.execvp(sys.argv[4],sys.argv[4:])
+''',
+
+'sleep': '#!/bin/sh\nexit 0\n',
 'systemctl':r'''#!/bin/bash
 printf '%s\n' "$*" >> /sim/systemctl.log
 case "$1" in
  show)
-  case "$4" in User|Group) [[ $CASE != wrong_identity ]] && printf 'cliproxy\n' || printf 'root\n';; *) printf '{ path=/opt/cliproxyapi/cli-proxy-api ; argv[]=/opt/cliproxyapi/cli-proxy-api -config /opt/cliproxyapi/config.yaml ; ignore_errors=no ; }\n';; esac;;
+  case "$4" in NRestarts) if [[ $CASE == crashrestart && ! -f /sim/start-failed ]] && [[ $(stat -c %s /opt/cliproxyapi/cli-proxy-api) -gt 1000 ]]; then printf '1\n'; else printf '0\n'; fi;; MainPID) printf '101\n';; User|Group) [[ $CASE != wrong_identity ]] && printf 'cliproxy\n' || printf 'root\n';; *) printf '{ path=/opt/cliproxyapi/cli-proxy-api ; argv[]=/opt/cliproxyapi/cli-proxy-api -config /opt/cliproxyapi/config.yaml ; ignore_errors=no ; }\n';; esac;;
  is-active) [[ $(cat /sim/service-state) == active ]];;
  stop) printf stopped > /sim/service-state;;
  start)
@@ -31,11 +40,8 @@ case "$1" in
 esac
 ''',
 
-# Rootless bwrap maps one uid only; runuser cannot switch to an unmapped uid.
-'runuser':r'''#!/bin/bash
-shift 3
-exec "$@"
-''',
+# runuser mock uses real setgroups/setgid/setuid; avoids host PAM dependencies.
+
 'curl':r'''#!/bin/bash
 out=''
 while (($#)); do
@@ -46,6 +52,12 @@ case "$url" in
  */releases/latest) [[ $CASE != offline ]] || exit 1; printf '{"tag_name":"v8.0.56"}\n';;
  */checksums.txt) if [[ $CASE == checksum ]]; then printf 'bad checksum' > "$out"; else /usr/bin/cp /fixtures/checksums.txt "$out"; fi;;
  */CLIProxyAPI_8.0.56_linux_amd64.tar.gz) /usr/bin/cp /fixtures/CLIProxyAPI_8.0.56_linux_amd64.tar.gz "$out";;
+ */v8/management/config/oauth/auth-dir) printf '"/srv/actual-auth"';;
+ */v8/management/config)
+  version=8.0.55
+  if [[ -e /opt/cliproxyapi/.cli-proxy-api.rollback ]] && [[ $(stat -c %s /opt/cliproxyapi/cli-proxy-api) -gt 1000 ]]; then version=8.0.56; fi
+  [[ $CASE != running_mismatch ]] || version=8.0.55
+  printf 'HTTP/1.1 401 Unauthorized\r\nX-CPA-VERSION: %s\r\n\r\n' "$version";;
  */v1/models)
   if [[ $CASE == delayed_recovery && ! -e /sim/health-delayed ]]; then touch /sim/health-delayed; printf '000'; exit 7; fi
   printf '200';;
@@ -83,22 +95,37 @@ def build_fixtures():
     m=BASE/'mocks'; m.mkdir(exist_ok=True)
     for n,s in MOCKS.items():
         p=m/n; p.write_text(s); p.chmod(0o755)
+    (f/'local_snapshot_boundary.py').write_text("""import importlib.util,sys,tarfile,os
+spec=importlib.util.spec_from_file_location('actual_runtime','/source/updater_runtime.py')
+m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+if sys.argv[1:]==['version']:print(m.WORKER_VERSION)
+elif sys.argv[1:]==['preflight']:m.check_service()
+elif sys.argv[1:]==['verify-auth']:
+ if os.environ.get('CASE')=='changed_auth':raise ValueError('auth-dir changed')
+elif sys.argv[1]=='snapshot':
+ with tarfile.open(sys.argv[2],'w:gz') as out:m.archive_sources(out,[('config.yaml',m.CONFIG),('auth-dir',m.approved_auth()),('plugins',m.APP+'/plugins')])
+else:raise SystemExit(2)
+""")
     return f,m
 
 def sandbox_args(f,m):
     # Root CI already has mount privileges; avoid a one-UID user namespace
     # losing access to runner-owned parent directories. Filesystem/network stay isolated.
     isolation = ['--unshare-pid','--unshare-net','--unshare-ipc','--unshare-uts'] if os.geteuid() == 0 else ['--unshare-all']
-    cmd=['bwrap',*isolation,'--die-with-parent','--ro-bind','/usr','/usr',
+    if os.geteuid() != 0:
+        raise RuntimeError('Run worker namespace tests with sudo; no host fallback or implicit escalation')
+    isolation = ['--unshare-pid','--unshare-net','--unshare-ipc','--unshare-uts']
+    cmd=['bwrap',*isolation,'--cap-add','ALL','--die-with-parent','--ro-bind','/usr','/usr',
          '--symlink','usr/bin','/bin','--symlink','usr/sbin','/sbin',
          '--symlink','usr/lib','/lib','--symlink','usr/lib64','/lib64',
-         '--proc','/proc','--dev','/dev','--tmpfs','/tmp','--tmpfs','/var',
+         '--tmpfs','/usr/local','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--tmpfs','/var',
          '--tmpfs','/run','--tmpfs','/opt','--tmpfs','/etc','--dir','/etc/alternatives',
          '--ro-bind','/usr/bin/mawk','/etc/alternatives/awk','--dir','/real',
          '--ro-bind','/usr/bin/mv','/real/mv','--ro-bind','/usr/bin/cp','/real/cp','--ro-bind','/usr/bin/df','/real/df',
          '--ro-bind',str(SOURCE),'/source','--ro-bind',str(BASE),'/review',
-         '--ro-bind',str(f),'/fixtures','--uid','0','--gid','0','--clearenv',
-         '--setenv','PATH','/usr/sbin:/usr/bin:/sbin:/bin','--setenv','LC_ALL','C']
+         '--ro-bind',str(f),'/fixtures','--uid','0','--gid','0','--cap-add','ALL','--clearenv',
+         '--setenv','PATH','/usr/sbin:/usr/bin:/sbin:/bin','--setenv','LC_ALL','C',
+         '--setenv','CPA_TEST_REAL_UID','1' if REAL_UID else '0']
     for n in MOCKS:
         p=Path('/usr/bin')/n
         if not p.exists(): p=Path('/usr/sbin')/n
@@ -106,13 +133,32 @@ def sandbox_args(f,m):
     return cmd
 
 SETUP=r'''
-printf 'root:x:0:0::/:/bin/bash\ncliproxy:x:0:0::/:/bin/bash\n' > /etc/passwd
-printf 'root:x:0:\ncliproxy:x:0:\n' > /etc/group
-mkdir -p /opt/cliproxyapi/auths /opt/cliproxyapi/plugins /run/cliproxy-updater/inbox /var/lib/cliproxy-updater/backups /var/tmp
+umask 022
+uid=0; [[ $CPA_TEST_REAL_UID != 1 ]] || uid=1234
+printf 'root:x:0:0::/:/bin/bash\ncliproxy:x:%s:%s::/home/cliproxy:/bin/bash\n' "$uid" "$uid" > /etc/passwd
+printf 'root:x:0:\ncliproxy:x:%s:\n' "$uid" > /etc/group
+mkdir -p /opt/cliproxyapi/auths /opt/cliproxyapi/plugins /run/cliproxy-updater/inbox /var/lib/cliproxy-updater/backups /var/tmp /var/lib/cliproxy-updater-status /usr/local/libexec /srv/actual-auth /root
+cp /source/updater_runtime.py /usr/local/libexec/cliproxy-updater-runtime.py
+if [[ $CPA_TEST_REAL_UID != 1 ]]; then
+ # Local single-UID worker control-flow only. CI explicitly runs the real helper.
+ cp /fixtures/local_snapshot_boundary.py /usr/local/libexec/cliproxy-updater-runtime.py
+fi
+chmod 0730 /run/cliproxy-updater/inbox
+printf fixture-only > /root/cliproxyapi-admin-key
+chmod 0600 /root/cliproxyapi-admin-key
+if [[ $CPA_TEST_REAL_UID == 1 ]]; then
+ python3 /source/tests/auth_api_fixture.py &
+ python3 -c 'import time,pathlib; p=pathlib.Path("/run/auth-fixture-ready"); end=time.monotonic()+5
+while not p.exists() and time.monotonic()<end: time.sleep(.01)
+assert p.exists()'
+fi
+printf '{"protocol":1,"auth_dir":"/srv/actual-auth"}\n' > /var/lib/cliproxy-updater/deployment.json
+chmod 0600 /var/lib/cliproxy-updater/deployment.json
 printf '#!/bin/sh\nprintf "CLIProxyAPI Version: 8.0.55, Commit: mock\\n"\n' > /opt/cliproxyapi/cli-proxy-api
 chmod 0755 /opt/cliproxyapi/cli-proxy-api
 printf 'mock: true\n' > /opt/cliproxyapi/config.yaml
 chmod 0600 /opt/cliproxyapi/config.yaml
+chown cliproxy:cliproxy /opt/cliproxyapi/config.yaml /srv/actual-auth /opt/cliproxyapi/plugins
 printf 'update v8.0.56' > /run/cliproxy-updater/inbox/request
 printf active > /sim/service-state
 [[ $CASE != mismatch ]] || printf 'update v8.0.54' > /run/cliproxy-updater/inbox/request
@@ -125,7 +171,7 @@ printf '%s' "$rc" > /sim/exit-code
 if [[ $CASE == killed ]]; then CASE=offline bash /source/cliproxy-updater-worker --recover >> /sim/worker.log 2>&1; fi
 [[ ! -e /var/lib/cliproxy-updater/transaction.json ]] || touch /sim/transaction-left
 [[ ! -e /opt/cliproxyapi/.cli-proxy-api.rollback ]] || touch /sim/rollback-left
-cp /run/cliproxy-updater/status.json /sim/status.json
+cp /var/lib/cliproxy-updater-status/status.json /sim/status.json
 [[ ! -e /run/cliproxy-updater/processing ]] || touch /sim/processing-left
 /opt/cliproxyapi/cli-proxy-api --version > /sim/installed-version
 '''
@@ -142,7 +188,7 @@ class WorkerTests(unittest.TestCase):
    self.assertEqual(json.loads((sim/'status.json').read_text())['state'],'rolled_back')
  def test_scenarios(self):
   f,m=build_fixtures()
-  for case,state,service in [('low_space','error','active'),('success','success','active'),('rollback_success','rolled_back','active'),('rollback_copy_failure','rollback_failed','stopped'),('term','rolled_back','active'),('int','rolled_back','active'),('hup','rolled_back','active'),('delayed_recovery','rolled_back','active'),('killed','rolled_back','active'),('stale','success','active'),('mismatch','needs_recheck','active'),('checksum','error','active'),('wrong_identity',None,'active'),('unsafe_new',None,'active')]:
+  for case,state,service in [('low_space','error','active'),('success','success','active'),('offline','error','active'),('changed_auth','error','active'),('running_mismatch','rolled_back','active'),('crashrestart','rolled_back','active'),('rollback_success','rolled_back','active'),('rollback_copy_failure','rollback_failed','stopped'),('term','rolled_back','active'),('int','rolled_back','active'),('hup','rolled_back','active'),('delayed_recovery','rolled_back','active'),('killed','rolled_back','active'),('stale','success','active'),('mismatch','needs_recheck','active'),('checksum','error','active'),('wrong_identity','error','active'),('unsafe_new',None,'active')]:
    with self.subTest(case=case), tempfile.TemporaryDirectory(dir=SCRATCH) as d:
     sim=Path(d)
     p=subprocess.run(sandbox_args(f,m)+['--bind',str(sim),'/sim','--setenv','CASE',case,'/bin/bash','-c',SETUP],capture_output=True,text=True,timeout=60)
@@ -190,10 +236,11 @@ exit "$rc"
  def test_version_timeout(self):
   f,m=build_fixtures()
   script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]+r'''
-printf '#!/bin/sh\nsleep 60\n' > /opt/cliproxyapi/cli-proxy-api
+printf '#!/bin/sh\nwhile :; do :; done\n' > /opt/cliproxyapi/cli-proxy-api
 bash /source/cliproxy-updater-worker --check > /sim/worker.log 2>&1
 rc=$?
-[[ $rc != 0 && ! -e /sim/curl.log ]]
+[[ $rc != 0 ]] || exit 10
+python3 -c 'from pathlib import Path; assert "releases/latest" not in Path("/sim/curl.log").read_text()'
 '''
   with tempfile.TemporaryDirectory(dir=SCRATCH) as d:
    p=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','--setenv','CASE','timeout','/bin/bash','-c',script],capture_output=True,text=True,timeout=15)
@@ -213,4 +260,66 @@ bash /source/cliproxy-updater-worker ARG >> /sim/worker.log 2>&1 || exit 11
 '''
     p=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','--setenv','CASE','rollback_copy_failure','/bin/bash','-c',script.replace(' ARG ',' '+argument+' ')],capture_output=True,text=True,timeout=30)
     self.assertEqual(p.returncode,0,p.stderr+(Path(d)/'worker.log').read_text())
-if __name__=='__main__': unittest.main()
+class RecoveryTests(unittest.TestCase):
+ def test_snapshot_cli_security(self):
+  if not REAL_UID:
+   self.skipTest('Real UID snapshot requires CPA_TEST_REAL_UID=1 on privileged isolated CI; local AppArmor forbids UID changes')
+  f,m=build_fixtures()
+  script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]+r'''
+set -e
+chmod 0750 /var/lib/cliproxy-updater-status
+mkdir -m 0700 /var/lib/cliproxy-updater/backups/20261105-1.0.0
+printf actual-secret > /srv/actual-auth/token
+chown cliproxy:cliproxy /srv/actual-auth/token
+printf fake > /opt/cliproxyapi/auths/fake
+python3 /usr/local/libexec/cliproxy-updater-runtime.py snapshot /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz
+tar tzf /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz > /sim/archive
+stat -c '%u %a' /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz > /sim/mode
+rm /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz
+ln -s /etc/passwd /srv/actual-auth/link
+if python3 /usr/local/libexec/cliproxy-updater-runtime.py snapshot /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz; then exit 10; fi
+test ! -e /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz
+rm /srv/actual-auth/link
+ln -s /etc/passwd /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz
+if python3 /usr/local/libexec/cliproxy-updater-runtime.py snapshot /var/lib/cliproxy-updater/backups/20261105-1.0.0/runtime-config.tar.gz; then exit 11; fi
+'''
+  with tempfile.TemporaryDirectory(dir=SCRATCH) as d:
+   result=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','/bin/bash','-c',script],capture_output=True,text=True,timeout=20)
+   self.assertEqual(result.returncode,0,result.stderr)
+   self.assertIn('auth-dir/token',(Path(d)/'archive').read_text())
+   self.assertNotIn('fake',(Path(d)/'archive').read_text())
+   self.assertEqual((Path(d)/'mode').read_text().strip(),'0 600')
+
+ def test_preflight_failure_retires_request_and_recovery_ignores_helper(self):
+  f,m=build_fixtures()
+  script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]+r'''
+rm /usr/local/libexec/cliproxy-updater-runtime.py
+bash /source/cliproxy-updater-worker --consume > /sim/worker.log 2>&1
+[[ $? != 0 && ! -e /run/cliproxy-updater/inbox/request ]] || exit 21
+python3 -c 'import json; assert json.load(open("/var/lib/cliproxy-updater-status/status.json"))["state"]=="error"' || exit 22
+printf '{"protocol":1,"state":"success","detail":"kept"}' > /var/lib/cliproxy-updater-status/status.json
+bash /source/cliproxy-updater-worker --recover || exit 23
+python3 -c 'import json; assert json.load(open("/var/lib/cliproxy-updater-status/status.json"))["state"]=="success"'
+'''
+  with tempfile.TemporaryDirectory(dir=SCRATCH) as d:
+   result=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','--setenv','CASE','helperfail','/bin/bash','-c',script],capture_output=True,text=True,timeout=20)
+   self.assertEqual(result.returncode,0,result.stderr)
+
+ def test_reboot(self):
+  f,m=build_fixtures()
+  script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]+r'''
+rm /run/cliproxy-updater/inbox/request
+printf '{"protocol":1,"worker_version":"0.5.0","state":"success","detail":"kept"}' > /var/lib/cliproxy-updater-status/status.json
+cp /var/lib/cliproxy-updater-status/status.json /sim/before
+bash /source/cliproxy-updater-worker --recover || exit 11
+cmp /sim/before /var/lib/cliproxy-updater-status/status.json || exit 12
+printf '{"state":"installing"}' > /var/lib/cliproxy-updater-status/status.json
+bash /source/cliproxy-updater-worker --recover || exit 13
+cp /var/lib/cliproxy-updater-status/status.json /sim/status.json
+'''
+  with tempfile.TemporaryDirectory(dir=SCRATCH) as d:
+   result=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','--setenv','CASE','reboot','/bin/bash','-c',script],capture_output=True,text=True,timeout=20)
+   self.assertEqual(result.returncode,0,result.stderr)
+   self.assertEqual(json.loads((Path(d)/'status.json').read_text())['state'],'interrupted')
+
+if __name__=='__main__' : unittest.main()

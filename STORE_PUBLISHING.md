@@ -1,8 +1,8 @@
-# CPA Web Updater — 官方商店发布格式（v0.4.0）
+# CPA Web Updater — 官方商店发布格式（v0.5.0）
 
 仓库：<https://github.com/flying864/cliproxyapi-web-updater>
 
-> **发布格式合规不等于店内一键安装。** ZIP 只包含动态库，不安装/升级 root worker、systemd units 或权限。当前安装器的 root-owned 插件目录不允许非 root 商店进程写入；本次不改变这个安全边界。不要 chmod 777、递归改属主或以 root 运行主程序。
+> **发布格式合规不等于店内一键安装。** ZIP 只包含动态库，不安装/升级 root worker、systemd units 或权限。安装器现在保留已有服务可写插件目录；若你仍使用旧 root-owned 不可写目录，商店写入仍会受阻，不自动放宽权限。不要 chmod 777、递归改属主或以 root 运行主程序。
 
 ## 代码与发布状态
 
@@ -14,12 +14,12 @@
 ## 验证与版本维护
 
 ```bash
-python3 -B scripts/check_release_version.py --tag v0.4.0
+python3 -B scripts/check_release_version.py --tag v0.5.0
 python3 -B scripts/validate_registry.py
 python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
 ```
 
-以后升级版本使用 `scripts/bump_version.py`；它同时检查 C metadata、ABI 单测、官方宿主单测、README 标题和 worker 注释五处，拒绝后缀、重复或不一致标记。不会自动更新历史 changelog 或发布说明，需人工审查。正常写入异常会尝试恢复原文件，不能把多文件更新称为断电原子事务。
+以后升级版本使用 `scripts/bump_version.py`；它同时检查 C metadata、ABI 单测、官方宿主单测、README 标题、worker 注释和可信 runtime 版本六处，拒绝后缀、重复或不一致标记。不会自动更新历史 changelog 或发布说明，需人工审查。正常写入异常会尝试恢复原文件，不能把多文件更新称为断电原子事务。
 
 完整验证定义在 `.github/workflows/verify-core.yml`：除了商店脚本回归，还执行原 ABI、sanitizer、worker、安装卸载和真实官方 v8.0.56 宿主集成。main 与 tag 复用该文件并 checkout 精确 `github.sha`，不会借用另一个 commit 的绿色状态。
 
@@ -30,16 +30,16 @@ python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
 推送 tag 会触发公开 Release，属于独立发布动作；普通源码修正不应顺手执行。确认审批、main 验证与变更后才进行：
 
 ```bash
-python3 -B scripts/check_release_version.py --tag v0.4.0
-git tag -a v0.4.0 -m 'CPA Web Updater v0.4.0'
-git push origin v0.4.0
+python3 -B scripts/check_release_version.py --tag v0.5.0
+git tag -a v0.5.0 -m 'CPA Web Updater v0.5.0'
+git push origin v0.5.0
 ```
 
 若 tag/Release 已存在，不覆盖、不强推，核对原状态或选择新版本。tag 工作流将生成：
 
 ```text
-cpa-updater_0.4.0_linux_amd64.zip
-cpa-updater_0.4.0_linux_arm64.zip
+cpa-updater_0.5.0_linux_amd64.zip
+cpa-updater_0.5.0_linux_arm64.zip
 checksums.txt
 ```
 
@@ -52,7 +52,7 @@ checksums.txt
 若发布步骤失败：先查看精确 tag 的 Release 是否不存在、为 draft 或已经公开，以及资产是否齐全。响应丢失不等于发布没有发生。流程不会自动删除或覆盖已有 Release。
 
 ```bash
-gh release view v0.4.0 --repo flying864/cliproxyapi-web-updater --json tagName,isDraft,isPrerelease,assets
+gh release view v0.5.0 --repo flying864/cliproxyapi-web-updater --json tagName,isDraft,isPrerelease,assets
 ```
 
 保留日志，在确认原因和获得相应授权后才恢复/删除草稿或重新发布。不要无条件重跑并覆盖。GitHub CLI 普通资产上传使用 draft 再公开，但强杀或网络错误仍需人工判断。
@@ -77,8 +77,7 @@ python3 -B scripts/market_preflight.py
 
 脚本只读取账户、路径属性及权限位，不创建探测文件、不修改权限、不调用 systemctl。它按 owner/group/other 的互斥优先级检查目录和祖先；即使权限位通过，也**不验证 ACL、只读挂载、systemd 沙箱或实际写入**。worker 文件存在不代表它已正确部署或健康。
 
-当前安装器要求 root-owned 插件目录，而官方商店以主服务用户写入 `plugins/<goos>/<goarch>/<id>-v<version>.so`。因此仍应使用源码安装器管理本插件和 worker；店内安装的权限模式需另行设计、审核、目标主机验收，不能在发布格式修复时放宽。
-
+官方商店以主服务用户写入 `plugins/<goos>/<goarch>/<id>-v<version>.so`。本版支持保留 `cliproxy:cliproxy 700` 插件目录，root Worker 和私有状态仍在独立可信路径。商店不会初始化 Worker；先执行一次 `sudo bash install.sh --worker-only`，页面协议检查通过后才允许更新。
 商店只更新动态库，不同步 worker。当前版本的 worker 仅更新版本注释，协议不变；未来不能以商店显示版本判断整套主机部署已升级。
 
 ## 平台与安全范围
@@ -89,12 +88,6 @@ python3 -B scripts/market_preflight.py
 - 同源 SHA256 不能独立抵御发布账号被攻陷。依赖 Actions 固定 commit SHA，后续更新应审核。
 - 原生库与主服务同进程；API 更新会短暂中断。自动恢复只恢复主程序二进制，不覆盖配置/OAuth 数据。
 
-## 旧源码补丁工具
+## 历史开发补丁工具
 
-已经 clone 本仓库当前 main 的用户**不需要运行** `apply_to_repo.sh`。工具仅用于把完整 v0.4.0 源码中的发布文件应用到仍停留在原 v0.3.0 的干净 checkout：
-
-```bash
-bash apply_to_repo.sh /path/to/clean-v0.3.0-checkout
-```
-
-它拒绝非 Git 根目录、dirty/冲突目标或不匹配基线；使用私有临时目录，正常异常回滚本次写入，不操作真实服务、不自动 commit/tag/push。只做本地转换/构建检查，不替代完整 CI。强杀/断电不保证自动恢复；不要将其当成通用代码合并工具。推荐直接使用仓库当前版本，避免维护重复补丁流程。
+`apply_to_repo.sh` 仅用于历史 v0.4.0 发布文件叠加，不适用于 v0.5.0 运行组件升级。它在本版应明确拒绝，不会把新 Worker/UI 的一部分套进旧源码。直接 clone 当前仓库并按 README 安装即可；确需旧开发补丁时使用已固定的 v0.4.0 源码提交，不修改新工具来绕过版本限制。
