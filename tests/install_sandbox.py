@@ -106,6 +106,25 @@ def inside(scenario):
             print('EXPECTED RED missing', missing, probe.stderr, flush=True)
             Path(missing).mkdir(mode=mode)
         return
+    libexec = Path('/usr/local/libexec')
+    if scenario in ('missing-libexec', 'uninstall-missing-libexec', 'symlink-libexec'):
+        libexec.rmdir()
+    if scenario == 'symlink-libexec':
+        libexec.symlink_to('/opt/cliproxyapi', target_is_directory=True)
+    if scenario == 'unsafe-libexec':
+        libexec.chmod(0o777)
+    if scenario == 'unsafe-libexec-parent':
+        libexec.rmdir()
+        libexec.parent.chmod(0o777)
+    if scenario in ('unsafe-libexec', 'symlink-libexec', 'unsafe-libexec-parent'):
+        invoke('install.sh', False)
+        assert not Path('/usr/local/libexec/cliproxy-updater-worker').exists()
+        assert not Path('/opt/cliproxyapi/plugins/cpa-updater.so').exists()
+        return
+    if scenario == 'uninstall-missing-libexec':
+        invoke('uninstall.sh', False)
+        assert not libexec.exists()
+        return
     if scenario == 'lock':
         Path('/var/lib/cliproxy-updater').mkdir(mode=0o700)
         with open('/var/lib/cliproxy-updater/lock','w') as f:
@@ -125,6 +144,7 @@ def inside(scenario):
         assert not Path('/opt/cliproxyapi/plugins/cpa-updater.so').exists()
     else:
         invoke('install.sh')
+        st = libexec.stat(); assert st.st_uid == 0 and st.st_mode & 0o022 == 0 and not libexec.is_symlink()
         assert Path('/opt/cliproxyapi/plugins').stat().st_mode&0o777==0o700
         for p,mode in [('/var/lib/cliproxy-updater',0o700),('/var/lib/cliproxy-updater/backups',0o700),('/run/cliproxy-updater',0o750),('/run/cliproxy-updater/inbox',0o730),('/var/lib/cliproxy-updater-status',0o750)]:
             st=Path(p).stat(); assert st.st_uid==0 and st.st_mode&0o777==mode,(p,oct(st.st_mode))

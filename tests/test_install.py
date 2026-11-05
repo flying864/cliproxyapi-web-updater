@@ -20,7 +20,7 @@ def load():
 class InstallTests(unittest.TestCase):
     def test_isolated_entrypoints(self):
         from install_sandbox import run
-        for scenario in ['preflight-missing', 'success', 'api', 'registered', 'trigger', 'identity', 'lock', 'worker-only']:
+        for scenario in ['missing-libexec', 'unsafe-libexec', 'symlink-libexec', 'unsafe-libexec-parent', 'uninstall-missing-libexec', 'preflight-missing', 'success', 'api', 'registered', 'trigger', 'identity', 'lock', 'worker-only']:
             with self.subTest(scenario=scenario):
                 result = run(scenario)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -32,6 +32,29 @@ class InstallTests(unittest.TestCase):
         with mock.patch.object(m, 'query', return_value=True), mock.patch.object(m.time, 'sleep'):
             m.health(api, None, budget=1)
         self.assertEqual(api.request.call_count, 2)
+
+    def test_missing_command_names_dependency_without_arguments(self):
+        m = load()
+        with mock.patch.object(m.subprocess, 'run', side_effect=FileNotFoundError(2, 'missing', 'gcc')):
+            with self.assertRaisesRegex(RuntimeError, 'gcc') as caught:
+                m.command('gcc', 'secret-fixture')
+        self.assertNotIn('secret-fixture', str(caught.exception))
+
+    def test_updater_units_keep_uid_capability_and_hardening(self):
+        m = load()
+        for unit in m.SERVICES:
+            text = m.units()[unit]
+            for setting in ['AmbientCapabilities=CAP_SETUID', 'NoNewPrivileges=true', 'ProtectSystem=strict', 'ProtectHome=read-only', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX']:
+                self.assertIn(setting + '\n', text)
+
+    def test_plugin_test_reports_missing_gcc_without_traceback(self):
+        import subprocess
+        import sys
+        result = subprocess.run([sys.executable, '-B', str(ROOT / 'test_plugin.py')],
+                                env={**os.environ, 'PATH': ''}, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('gcc', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
 
     def test_command_has_timeout(self):
         m = load()

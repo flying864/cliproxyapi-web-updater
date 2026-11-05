@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import sys
 import tempfile
 import unittest
 
@@ -166,4 +168,6 @@ class Regression(unittest.TestCase):
         self.assertNotIn(b'localStorage',body)
 
 if __name__ == '__main__':
+    if shutil.which('gcc') is None:
+        sys.exit('缺少 gcc 或不在 PATH 中；请先安装 C 编译器再运行插件测试')
     unittest.main(verbosity=2)

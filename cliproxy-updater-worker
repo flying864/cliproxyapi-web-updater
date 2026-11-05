@@ -240,7 +240,9 @@ esac
 HEADERS=$(curl --noproxy '*' -sS -D - -o /dev/null --max-time 4 http://127.0.0.1:8317/v8/management/config) || { echo 'Unable to contact running host' >&2; exit 1; }
 CURRENT=$(printf '%s' "$HEADERS" | python3 -c 'import re,sys; h=re.findall(r"(?im)^X-CPA-VERSION:[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*\r?$",sys.stdin.read()); print(h[0] if len(h)==1 else "")')
 [[ "$CURRENT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Unable to identify running version' >&2; exit 1; }
-[[ $(version_of "$BIN") == "$CURRENT" ]] || { echo 'Running and on-disk versions differ; manual review required' >&2; exit 1; }
+PHASE=version_probe
+DISK_VERSION=$(version_of "$BIN") || { echo 'Unable to probe on-disk version (permissions or execution environment); not a version mismatch' >&2; exit 1; }
+[[ "$DISK_VERSION" == "$CURRENT" ]] || { echo 'Running and on-disk versions differ; manual review required' >&2; exit 1; }
 PHASE=checking
 write_status checking "正在查询官方 GitHub 最新正式版本"
 # Official GitHub endpoint only. No user-specified download URL or repository.

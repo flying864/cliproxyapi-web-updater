@@ -32,7 +32,10 @@ BASE = 'http://127.0.0.1:8317'
 
 
 def command(*args, timeout=45):
-    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).stdout.strip()
+    try:
+        return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).stdout.strip()
+    except FileNotFoundError:
+        raise RuntimeError('缺少命令或不在 PATH 中: ' + args[0] + '；请先安装对应依赖（gcc 需要 C 编译器）') from None
 
 
 def ctl(*args):
@@ -259,7 +262,7 @@ def units():
             head += 'OnFailure=cliproxy-updater-recover.service\n'
         body = '[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/libexec/cliproxy-updater-worker ' + mode + '\n'
         body += f'TimeoutStartSec={timeout}\nTimeoutStopSec=180\nMemoryMax=384M\nTasksMax=64\nLimitNOFILE=256\n'
-        body += 'PrivateTmp=true\nNoNewPrivileges=true\nProtectSystem=strict\nReadWritePaths=/opt/cliproxyapi /var/lib/cliproxy-updater /var/lib/cliproxy-updater-status /run/cliproxy-updater\nProtectHome=read-only\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n'
+        body += 'AmbientCapabilities=CAP_SETUID\nPrivateTmp=true\nNoNewPrivileges=true\nProtectSystem=strict\nReadWritePaths=/opt/cliproxyapi /var/lib/cliproxy-updater /var/lib/cliproxy-updater-status /run/cliproxy-updater\nProtectHome=read-only\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n'
         if recover:
             body += '[Install]\nWantedBy=multi-user.target\n'
         result['cliproxy-updater.' + suffix if suffix == 'service' else 'cliproxy-updater-' + suffix] = head + body
@@ -344,6 +347,12 @@ def run(installing, worker_only=False):
     if os.geteuid() != 0:
         raise RuntimeError('必须 root 执行')
     os.umask(0o077)
+    if installing:
+        libexec = WORKER.parent
+        safe_path(libexec.parent, True)
+        if not os.path.lexists(libexec):
+            ensure_directory(libexec, 0o755)
+        safe_path(libexec, True)
     validate_service()
     api = API()
     discovered = api.request('/v8/management/plugins')

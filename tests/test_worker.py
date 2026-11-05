@@ -233,6 +233,19 @@ exit "$rc"
    p=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','--setenv','CASE','preflight','/bin/bash','-c',script],capture_output=True,text=True,timeout=20)
    self.assertEqual(p.returncode,0,p.stderr)
    self.assertFalse((Path(d)/'curl.log').exists())
+ def test_disk_version_probe_classification(self):
+  f,m=build_fixtures()
+  for output,code,message in [('ignored',1,'Unable to probe on-disk version'),('CLIProxyAPI Version: 8.0.54, Commit: fixture',0,'Running and on-disk versions differ')]:
+   script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]
+   script += "printf '#!/bin/sh\necho \"%s\"\nexit %s\n' > /opt/cliproxyapi/cli-proxy-api\n" % (output,code)
+   script += 'bash /source/cliproxy-updater-worker --check > /sim/worker.log 2>&1; [[ $? != 0 ]]'
+   with self.subTest(code=code), tempfile.TemporaryDirectory(dir=SCRATCH) as d:
+    p=subprocess.run(sandbox_args(f,m)+['--bind',d,'/sim','--setenv','CASE','probe','/bin/bash','-c',script],capture_output=True,text=True,timeout=20)
+    self.assertEqual(p.returncode,0,p.stderr)
+    log=(Path(d)/'worker.log').read_text()
+    self.assertIn(message,log)
+    if code: self.assertNotIn('Running and on-disk versions differ',log)
+    self.assertNotIn('stop cliproxyapi.service',(Path(d)/'systemctl.log').read_text())
  def test_version_timeout(self):
   f,m=build_fixtures()
   script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]+r'''
