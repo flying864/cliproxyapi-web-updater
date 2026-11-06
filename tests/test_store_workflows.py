@@ -28,6 +28,17 @@ class WorkflowContract(unittest.TestCase):
             self.assertIn(command, core)
         self.assertIn('ref: ${{ github.sha }}', core)
 
+    def test_shell_syntax_checks_reference_existing_scripts(self):
+        core = self.text('verify-core.yml')
+        match = re.search(r'for script in ([^;\n]+); do\s+bash -n "\$script"', core)
+        self.assertIsNotNone(match)
+        assert match is not None
+        scripts = match[1].split()
+        self.assertTrue(scripts)
+        for script in scripts:
+            with self.subTest(script=script):
+                self.assertTrue((ROOT / script).is_file(), script)
+
     def test_both_native_builds_are_checked_before_release(self):
         build = self.text('build-store.yml')
         for text in ['ubuntu-24.04', 'ubuntu-24.04-arm', 'scripts/smoke_plugin.py',

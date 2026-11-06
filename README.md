@@ -1,33 +1,46 @@
 # CPA Web Updater v0.5.0
 
-**打开页面 → 检查更新 → 点击立即更新。** 后台一个按需运行的脚本负责下载、校验、备份、替换、重启和失败恢复；平时没有常驻更新进程。
+给现有 CLIProxyAPI 增加一个更新页面：**检查更新 → 确认版本 → 立即更新**。后台按需下载、校验、备份和重启，失败时尝试恢复旧二进制；没有常驻更新进程，也不会自动安装新版本。
 
-仓库：[flying864/cliproxyapi-web-updater](https://github.com/flying864/cliproxyapi-web-updater)。第三方项目，不是官方安装器，也未自动上架官方商店。
+这是[第三方项目](https://github.com/flying864/cliproxyapi-web-updater)，不是 CLIProxyAPI 官方安装器。源码、Release、官方商店登记和主机部署是四件不同的事，不能相互替代。
 
-## 页面只有两项操作
+## 快速使用
 
-- **检查更新**：当前版本、最新正式版、官方更新日志链接。
-- **立即更新**：确认具体版本及短暂中断提醒，提交后台任务。
+已经安装并初始化？在你信任的管理入口域名后打开：
 
-页面自动读取最近一次结果。CLIProxyAPI 重启时暂时断开，只显示重新连接，不把 HTTP 断线判为升级失败；恢复后自动显示成功、错误或回滚结果。没有任务中心、历史列表、通知、多服务器或无人值守升级。
+```text
+/v0/resource/plugins/cpa-updater/panel
+```
 
-## 现有主机保持不变
+1. 输入 **Management Key（管理密钥）**，不是客户端 API Key。
+2. 点击“检查更新”，查看当前版本、最新正式版和官方更新日志。
+3. 确认目标版本及短暂中断提醒，再点击“立即更新”。不要在有关键请求运行时更新。
+4. 等页面重新连接，查看最终结果。服务重启导致的断线本身不代表升级失败。
 
-支持 Ubuntu 24.04 原生 systemd、glibc、amd64/arm64：
+密钥只保存在页面内存，刷新后需要重输。页面只显示最近结果，没有任务中心、历史列表、多服务器管理或手动降级功能。
 
-- 主服务 `cliproxyapi.service`，`User=cliproxy`、`Group=cliproxy`。
-- 主程序 `/opt/cliproxyapi/cli-proxy-api`，配置 `/opt/cliproxyapi/config.yaml`。
-- `-config` 和 `--config` 均可，准确指向上述配置；保留无歧义附加参数，不重写主 service。无法可靠解析的 wrapper/多条 ExecStart/重复 config 会拒绝，不尝试改写。
-- `/opt/cliproxyapi` 保持 root 控制，例如 `root:cliproxy 750`。
-- `/opt/cliproxyapi/plugins` 可保持 `cliproxy:cliproxy 700`，或已有安全 root-owned 布局。安装器不递归 chmod/chown，不强制改变已有目录权限。服务可写目录的动态库操作以服务账户执行，root 不执行其中的代码。
-- 管理 API `127.0.0.1:8317`；首次初始化及升级前核对 OAuth 目录时读取 `/root/cliproxyapi-admin-key`。密钥只用于固定本机管理 API，不写入日志或 UI。
-- 配置文件须可由服务保存：例如 `cliproxy:cliproxy 600` 或 `root:cliproxy 660`，不得其他用户可读写或使用不安全链接。
+## 安装
 
-不支持 Docker/DSM/macOS/Windows，不迁移部署、不改 Nginx、SOCKS5/Xray 或业务模型设置。
+### 先确认是否适用
 
-## 首次安装
+本项目**不安装 CLIProxyAPI 主程序**，只支持符合以下布局的已有主机：
 
-先阅读代码，在维护窗口执行。完整安装会短暂重启主服务以加载插件，但不修改其启动参数：
+| 项目 | 要求 |
+| --- | --- |
+| 系统 | Ubuntu 24.04 原生 Linux、glibc、systemd；amd64 或 arm64 |
+| 主服务 | 正常运行的 `cliproxyapi.service`，明确设置 `User=cliproxy`、`Group=cliproxy` |
+| 程序与配置 | `/opt/cliproxyapi/cli-proxy-api`、`/opt/cliproxyapi/config.yaml` |
+| 启动参数 | 恰好一个 `-config` 或 `--config` 指向上述配置；保留可明确解析的其他参数 |
+| 管理 API | 本机 `127.0.0.1:8317` 可用 |
+| 本机管理密钥 | 已存在于 `/root/cliproxyapi-admin-key`，由 root 控制且仅 root 可读 |
+
+不支持 Docker、DSM、macOS、Windows，也不迁移部署或改 Nginx、SOCKS5/Xray、模型设置。wrapper、多条 ExecStart、重复或含糊的配置参数会被拒绝，不会尝试重写主服务。
+
+目录和配置权限也有要求，安装前请核对[部署与安全边界](docs/SECURITY.md)。**不要为了通过检查而使用 `chmod 777`、递归改属主或让主服务以 root 运行。**
+
+### 首次完整安装
+
+先备份重要数据、审阅源码，再在维护窗口执行。最后一条命令会安装插件和后台组件，并短暂重启主服务：
 
 ```bash
 git clone https://github.com/flying864/cliproxyapi-web-updater.git
@@ -36,89 +49,69 @@ python3 -B test_plugin.py
 sudo bash install.sh
 ```
 
-依赖 gcc、Python 3 标准库、curl、Bash、systemd 和常见 coreutils/util-linux；不需要数据库、pip/npm 包或额外 Web 服务。缺少依赖会报错，不自动安装软件。
+需要 Git（获取源码）、gcc、Python 3 标准库、curl、Bash、systemd 及常见 coreutils/util-linux 命令。缺少依赖会报错，不会自动安装软件。不需要 pip/npm 包、数据库或额外 Web 服务。
 
-如果 UI 已经由插件商店安装，仅初始化更新脚本：
+### 已经从商店安装了页面
+
+在**同版本源码目录**中初始化后台组件（Worker）：
 
 ```bash
 sudo bash install.sh --worker-only
 ```
 
-此模式不覆盖插件、不改 plugins 配置、不重启主服务。只有受 root 控制的 Worker、辅助代码、systemd 更新单元和状态目录会被安装。未初始化或协议不兼容时，页面禁用操作并提示，不显示虚假的可用状态。
+该模式不覆盖插件、不改插件配置、不重启主服务；只安装后台脚本、辅助代码、systemd 单元及状态目录。商店只分发动态库，不会安装或同步 root Worker。页面提示未初始化或协议不兼容时，不能直接更新；请管理员核对配套版本。
 
-初始化通过官方管理 API 读取实际 `auth-dir`，将获准路径固定到 root 私有 `deployment.json`；每次升级前重新查询实际目录并与批准记录比较；更改 auth-dir 后会中止升级并要求重新初始化，不会让可写配置指挥 root 备份任意目录。
+### 卸载
 
-## 日常使用
-
-在可信管理入口打开：
-
-```text
-/v0/resource/plugins/cpa-updater/panel
-```
-
-输入 Management Key（不是普通客户端 API Key），点击检查更新，再确认立即更新。Key 仅在页面内存保存；刷新页面后需重新输入，断线自动重试不会把 Key 写入浏览器持久存储。
-
-每七天仅自动检查，不自动安装。暂时关闭/恢复定期检查：
-
-```bash
-sudo systemctl disable --now cliproxy-updater-check.timer
-sudo systemctl enable --now cliproxy-updater-check.timer
-```
-
-这是管理员可选操作；网页手动检查不依赖定时器。
-
-## 后台做什么
-
-1. 核对服务身份、路径和确认的正式版本。
-2. 下载固定官方仓库的程序包、校验 SHA256 和 ELF 架构。
-3. 在 root 私有目录备份旧二进制及配置、已批准的实际 OAuth 目录和插件数据；读取不可信运行数据时降权，不跟随链接或特殊文件。
-4. 持久保存恢复记录后停止主服务，原子替换二进制并启动原服务。
-5. 检查实际运行版本、API 就绪及短暂稳定窗口；失败尝试恢复旧二进制。
-
-不更改现有 API Key、OAuth、代理、Nginx 或主服务参数。新版本自身可能迁移数据，不能承诺无损自动迁移；自动恢复只恢复二进制，不覆盖 OAuth/config。真实模型调用或图片生成可能收费，不作为默认健康检查。
-
-## 状态与恢复
-
-- 最近状态：`/var/lib/cliproxy-updater-status/status.json`，root 控制，服务组只读，重启后保留。
-- 私有备份/事务：`/var/lib/cliproxy-updater`，仅 root 可读。
-- 临时请求：`/run/cliproxy-updater/inbox`，只允许固定检查/更新命令。
-
-```bash
-sudo journalctl -u cliproxy-updater.service -u cliproxy-updater-recover.service -n 100 --no-pager
-sudo cat /var/lib/cliproxy-updater-status/status.json
-```
-
-若恢复失败，保留记录和备份，并明确显示失败。解决磁盘/配置等底层问题后可在维护窗口重试：
-
-```bash
-sudo systemctl start cliproxy-updater-recover.service
-```
-
-不要直接删除事务来“解锁”。备份达到容量预算会拒绝更新，不自动清理失败材料；无遗留事务且确认不再需要后由管理员归档。没有 Web 手动切换旧版本功能。
-
-## 卸载
+在源码目录执行：
 
 ```bash
 sudo bash uninstall.sh
 ```
 
-完整卸载可能重启主服务；保留用户配置、账号和备份，不改插件目录权限。商店自行安装的版本化 `.so` 仍由商店管理，初始化脚本不以通配符删除它们。
+完整卸载可能重启主服务。保留用户配置、账号和备份，不修改插件目录权限；商店安装的版本化 `.so` 仍由商店管理，不会被通配符删除。
 
-## 开发与验证
+## 常见问题
+
+### 会自动更新吗？
+
+不会。默认开机后安排一次检查，之后约每七天检查，带随机延迟；安装必须手动确认。管理员可关闭或恢复定时检查，网页手动检查不受影响：
 
 ```bash
-python3 -B test_plugin.py
-node tests/test_panel.js
-python3 -B tests/test_sanitizer.py
-sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_worker.py
-python3 -B tests/test_install.py
-python3 -B tests/test_simple_install.py
-sudo python3 -B tests/test_runtime.py
-python3 -B -m unittest discover -s tests -p 'test_store_*.py'
+# 关闭
+sudo systemctl disable --now cliproxy-updater-check.timer
+# 恢复
+sudo systemctl enable --now cliproxy-updater-check.timer
 ```
 
-Node 仅用于前端行为测试，不是生产运行依赖。系统路径测试必须使用 bubblewrap，安装测试需要已授权的非交互 sudo/root，缺隔离能力就报错，不退回宿主执行。`CPA_TEST_REAL_UID=1` 强制真实非 root 归档路径测试；受 AppArmor 限制的本机可不带该变量运行控制流替身，但真实 UID 用例会明确跳过，不能当作完整验收。不要解除主机安全策略来绕过限制。真实官方宿主集成方法见 `tests/test_official.py`；包含测试子进程重启后的结果恢复，不接触线上主服务。
+### 更新会改动账号或配置吗？
 
-CI 同时验证 Linux amd64/arm64 的生产库；amd64 做官方 v8.0.56 完整插件集成。真实 VPS 更新、真实 OAuth/聊天/图片/反代验收需单独授权，源码测试与 CI 不代表已部署。
+更新器不主动改 API Key、OAuth、代理和主服务启动参数。但新版本主程序可能迁移数据。**自动回滚只恢复二进制，不恢复配置/OAuth，也不能撤销不可逆迁移。** 备份并不等于无损回滚保证。
 
-商店打包与发布见 [STORE_PUBLISHING.md](STORE_PUBLISHING.md)。main 推送只验证构建；tag 发布、Release 和官方商店登记是独立操作，不自动执行。
+### 页面断线、报错或恢复失败怎么办？
+
+先等主服务重连，查看最近状态和日志：
+
+```bash
+sudo cat /var/lib/cliproxy-updater-status/status.json
+sudo journalctl -u cliproxy-updater.service -u cliproxy-updater-recover.service -n 100 --no-pager
+```
+
+不要反复点击、删除事务或队列来“解锁”。恢复失败、磁盘不足和备份容量问题的处理见[运维与恢复](docs/OPERATIONS.md)。
+
+### 改过 OAuth 目录后为什么无法更新？
+
+初始化会通过本机管理 API 确认实际 `auth-dir`，保存到 root 私有批准记录。每次升级前重新核对；路径变化会中止。管理员确认新路径合法且没有遗留事务后，用同版本源码重新运行 `sudo bash install.sh --worker-only`。不要手工伪造批准记录。
+
+### 商店无法安装，或页面有了却不能更新？
+
+商店需要主服务用户能写入插件目录，旧的 root-owned 只读布局可能不满足；即使页面安装成功，也仍需单独初始化 Worker。详见[商店打包与发布](STORE_PUBLISHING.md)，不要以放宽整个应用目录权限解决问题。
+
+## 更多说明
+
+- [部署与安全边界](docs/SECURITY.md)：目录权限、更新流程、信任边界。
+- [运维与恢复](docs/OPERATIONS.md)：状态位置、故障处理、备份管理。
+- [开发与测试](docs/DEVELOPMENT.md)：本地命令、隔离要求、CI 范围。
+- [验证记录](AUDIT.md)：历史验证及未覆盖内容，不是当前机器的验收报告。
+- [商店打包与发布](STORE_PUBLISHING.md) · [官方登记 PR 模板](OFFICIAL_REGISTRY_PR.md)。
+- [版本历史](CHANGELOG.md) · [第三方组件及许可](THIRD_PARTY.md)。

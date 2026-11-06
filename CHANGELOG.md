@@ -1,38 +1,40 @@
-# Changelog
+# 版本历史
+
+这里保留各版功能和修复记录，不代表对应 Release 已发布或已部署。历史工具行为按当时版本记录，旧源码可在 Git 历史中查阅。
 
 ## 0.5.0
 
-- Keep a two-action Web UI: check, confirm update, and automatic reconnect to the last result.
-- Preserve existing `--config`/`-config` service arguments and safe service-owned plugin directory permissions.
-- Add worker-only initialization without replacing the plugin or restarting the main service.
-- Persist public status separately from root-private backups and reject missing/incompatible worker protocol.
-- Approve the actual OAuth directory once and read runtime backup data without root privileges.
-- Strengthen readiness with the running host version and a stable service observation window.
-- No task center, history UI, notification service, database, automatic upgrade or runtime framework.
+- 网页保留检查、确认更新两项操作，并自动重连读取最近结果。
+- 保留现有 `--config`/`-config` 参数及安全的服务用户插件目录权限。
+- 增加仅初始化 Worker 的模式，不替换插件或重启主服务。
+- 将公开持久状态与 root 私有备份分开；拒绝缺失或不兼容的 Worker 协议。
+- 初始化时批准实际 OAuth 目录；读取运行数据备份时不使用 root 身份。
+- 健康检查核对实际运行版本，并观察主服务短暂稳定窗口。
+- 不增加任务中心、历史 UI、通知服务、数据库、自动升级或运行时框架。
 
 ## 0.4.0
 
-- Add official-store schema v1 registry and native amd64/arm64 ZIP packaging.
-- Require full verification of the exact tag commit before publishing; reuse main CI and pin Actions commits.
-- Validate the final production library ABI before packaging and read back published asset bytes.
-- Include the official-host test in complete version checks; reject numeric-prefix/suffix mismatches.
-- Correct read-only permission-bit checks and reject nonregular ZIP entries.
-- Guard legacy overlay application against conflicts and ordinary partial-write failures.
-- Preserve root worker and host permission boundaries; store publication is not a one-click host installer.
+- 增加官方商店 schema v1 元数据及原生 amd64/arm64 ZIP 打包。
+- 发布前完整验证精确 tag commit，复用 main CI 并固定 Actions commit。
+- 打包前验证最终生产库 ABI；发布后回读资产实际字节。
+- 将官方宿主测试纳入版本一致性检查，拒绝数字前缀/后缀误匹配。
+- 修正只读权限位检查，拒绝非普通 ZIP 条目。
+- 为当时的旧版补丁叠加工具增加冲突检查和普通部分写入失败恢复。
+- 保留 root Worker 与主机权限边界；商店发布不等于主机一键安装。
 
 ## 0.3.0
 
-- Fix official plugin registration metadata and full management routes; use the project GitHub repository.
-- Bind the confirmed version end-to-end through `Query.version`, trusted status and the worker release check.
-- Publish the single-file queue atomically without a transient second hard link.
-- Replace substring JSON dispatch with bounded structured parsing; vendor the MIT-licensed jsmn header.
-- Add isolated plugin, official-host, sanitizer, worker and installer regression tests. Tests do not use production paths or real credentials.
-- Persist the binary recovery transaction before stopping the main service. Keep recovery material and explicit failure state when recovery fails.
-- Add bounded probes/downloads/archives and offline interrupted-transaction recovery without reattempting an update.
-- Share installer/uninstaller validation, locking and rollback code in a Python stdlib helper; no new daemon or package dependency.
-- Require verified registration and endpoints before reporting installation success; protect plugin directory access and other-plugin configuration.
-- Clarify that rollback restores the binary only, not configuration/OAuth data or irreversible data migrations.
+- 修复官方插件注册元数据和完整管理路由，使用本项目 GitHub 仓库地址。
+- 将用户确认版本贯穿 `Query.version`、可信状态与 Worker 发布检查。
+- 原子发布单文件队列，消除短暂第二条硬链接。
+- 用有界结构化 JSON 解析替代子串分派，引入 MIT 许可的 jsmn 头文件。
+- 增加隔离的插件、官方宿主、sanitizer、Worker 和安装器回归测试，不使用生产路径或真实凭据。
+- 在停止主服务前持久保存二进制恢复事务；恢复失败时保留材料和明确失败状态。
+- 为探测、下载和归档增加边界；中断事务离线恢复时不重新尝试升级。
+- 安装/卸载共用 Python 标准库 helper，复用校验、锁和失败恢复；无新增守护进程或包依赖。
+- 报告安装成功前验证真实注册和接口；保护插件目录访问和其他插件配置。
+- 明确回滚只恢复二进制，不恢复配置/OAuth 或不可逆迁移。
 
 ## 0.2.0
 
-Original uploaded implementation. See the v0.3.0 audit and regression coverage for verified compatibility and transaction defects.
+最初上传的实现。已确认的兼容性与事务缺陷见 [v0.3.0 历史验证](AUDIT.md)及相关回归覆盖。

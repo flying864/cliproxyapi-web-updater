@@ -1,73 +1,69 @@
-# 验证与边界
+# 验证记录与未覆盖范围
 
-## v0.5.0 简化一键更新
+**这是历史验证记录，不是当前工作树或生产主机的验收结论。** 测试数量、版本和已执行结果仅对应当时记录；当前结果应以精确 commit 的测试输出/Actions 记录为准。源码交付、Push、CI、Release 和生产部署不能混为一谈。
 
-两按钮 UI、最近状态持久化、协议初始化提示和重连恢复；没有新增任务中心、数据库或常驻服务。root 辅助代码只用于安全执行参数检查及降权归档，存放于固定 root libexec 路径。
+当前测试方法见[开发指南](docs/DEVELOPMENT.md)，操作风险见[安全说明](docs/SECURITY.md)。本文件不授权发布或部署。
 
-本地已执行官方 v8.0.56 测试子进程真实退出/重启并验证持久结果恢复；Node vm 执行真实嵌入脚本，模拟 POST 未送达、断线后重连及重复点击。集成测试并非生产主机升级。
+## v0.5.0：两项操作与初始化
 
-本机 AppArmor 限制跨 UID，worker 本地控制流使用明确的 snapshot 边界替身，真实降权归档用例在本机显式 skipped；不通过解除 AppArmor 来掩盖限制。GitHub CI 设置 `CPA_TEST_REAL_UID=1`，要求真实非 root 子进程读取配置/OAuth/plugins、root 控制输出并拒绝链接。CI 结果以精确 commit 运行记录为准。
+- UI 只保留检查与确认更新，最近状态持久化，并有协议初始化提示和断线重连；未新增任务中心、数据库或常驻服务。
+- 本地曾执行固定官方 v8.0.56 测试子进程真实退出/重启，验证持久结果恢复。Node vm 执行真实嵌入脚本，模拟 POST 未送达、重连及重复点击；这不是生产升级。
+- 本机 AppArmor 限制跨 UID，Worker 控制流使用明确的 snapshot 边界替身；真实降权归档用例显式 skipped，没有解除 AppArmor。CI 设置 `CPA_TEST_REAL_UID=1`，要求真实非 root 子进程读取配置/OAuth/plugins、root 控制输出并拒绝链接；是否通过仍以具体 CI 记录为准。
+- 支持 `-config`/`--config` 和无歧义附加参数，不重写主 service。保留安全插件目录权限，Worker-only 安装不修改插件、不重启主服务。
+- 初始化时通过 API 批准实际 auth-dir，升级前固定 loopback API 再核对；变化即中止并要求重新初始化。辅助代码在固定 root libexec 路径，自动回滚仍只恢复二进制。
 
-支持 `-config`/`--config` 及无歧义附加参数，不重写原主service。已有安全插件目录权限不变，Worker-only 安装不修改插件或重启主service。auth-dir由初始化API确认后固定root记录，每次升级前通过固定loopback API重新核对，变化时中止并要求重新初始化。自动回滚仍只恢复二进制。
+## v0.4.0：商店格式与发布门禁
 
-## v0.4.0 商店格式修正
+- 保留 v0.3.0 的业务权限和更新协议边界，增加版本、权限、ZIP、旧补丁应用回归及工作流依赖检查。
+- main 与 tag 复用完整验证；双架构 job 加载最终生产库。源码 Push 不授权 tag/Release，Actions 状态需核对精确 commit。
+- 修复/补测官方集成测试版本遗漏、稳定版本前缀误接受、发布未依赖完整验证、owner 借用 group 权限、非普通 ZIP 条目，以及当时旧补丁工具的冲突和普通失败恢复。
+- 部分代码是后补回归，不宣称所有内容从零严格 TDD。旧补丁工具现已移除，历史行为可在 Git 中查阅。
+- 当时未执行生产商店安装、权限迁移、Release 或注册表 PR。root-owned 不可写目录仍可能阻止店内安装；arm64 构建/ABI 冒烟不等于完整服务验收。
 
-保留下面 v0.3.0 的运行组件验证边界，业务权限和更新协议没有扩张。新增版本/权限/ZIP/应用回归和工作流依赖检查；main 与 tag 使用相同完整验证 job，双架构 job 加载最终生产库。Actions 成功与发布状态必须以精确 commit 的远端记录为准；源码推送不授权 tag/Release。
+## v0.3.0：历史兼容性与事务修复
 
-修复对应审核缺口：官方集成测试版本漏改、稳定版本前缀误接受、发布未依赖完整验证、owner 借用 group 权限、非普通 ZIP 条目误接受、旧版补丁冲突和普通失败回滚。部分已有代码用回归补测，不能宣称所有内容从零严格 TDD。
+该版修复 v0.2.0 的注册、接口路径、版本确认、队列发布、更新恢复及安装事务，不增加业务功能。运行组件仍为 C 插件和 Bash Worker；Python 标准库 helper 是一次性辅助程序，不是新服务。
 
-尚未执行生产商店安装、权限迁移、Release 发布或注册表 PR；仍不支持当前 root-owned 目录中的店内一键安装。完整官方宿主验收为 amd64 v8.0.56；arm64 的构建/ABI 冒烟不等于完整服务验收。
+### 固定官方宿主
 
-## v0.3.0 历史验证
+- CLIProxyAPI v8.0.56，commit `585f97deac9aa57c700301221fb1a7085e1827cc`。
+- Linux amd64 官方压缩包 SHA256：`6f313dfdfbb62154de97a446cfc47d5a3419723484ea9f3bc1fb0a3015d195e7`。
 
-## 目的
+在隔离网络和文件系统中使用真实二进制验证：
 
-本版本修复 v0.2.0 的注册、接口路径、版本确认、队列发布、更新恢复和安装事务问题，不增加业务功能。运行时仍是 C 插件、Bash worker；安装/卸载共用一次性的 Python 标准库 helper，不是新服务。
+- 插件注册、effective_enabled、当时 v0.3.0 版本及本仓库元数据。
+- 匿名资源页 200，匿名管理请求 401；测试密钥 status 200、check 202。
+- 缺失、多值、过期确认版本被拒绝且不入队，正确版本准确入队。
+- 并发仅一个请求成功，request 链接数始终为 1。
+- v8 config/plugins 返回直接配置对象，与安装 helper 的数据结构一致。
 
-## 真实官方集成
+### 当时本地回归
 
-固定基准 CLIProxyAPI v8.0.56，commit `585f97deac9aa57c700301221fb1a7085e1827cc`，Linux amd64 官方压缩包 SHA256：
+| 项目 | 记录的验证范围 |
+| --- | --- |
+| C 编译 | `-std=c11 -Wall -Wextra -Werror -O2 -fPIC -shared` |
+| `test_plugin.py` | 9 项回归，独立临时目录及编译期状态属主注入，不碰生产 `/run` |
+| `tests/test_sanitizer.py` | 12,000 次有界畸形 ABI 请求，ASan/UBSan 未报错，不是形式证明 |
+| `tests/test_worker.py` | 6 项 unittest；成功、替换/启动失败、恢复失败及重试、TERM/INT/HUP、强杀后离线恢复、低磁盘、版本/checksum 错误、错误身份、暂存链接、归档超限、只读 preflight、版本探测超时等子场景 |
+| `tests/test_install.py` | 13 项 unittest；首次/重复安装、卸载、API/注册/触发器失败恢复、锁竞争、目录与权限、恢复 unit、命令时限、健康等待等子场景 |
+| 语法与 unit | Shell 逐一 `bash -n`、Python AST 校验；在私有文件系统对原始 unit 执行 `systemd-analyze verify`，未改 ExecStart 为 true 掩盖缺文件 |
 
-`6f313dfdfbb62154de97a446cfc47d5a3419723484ea9f3bc1fb0a3015d195e7`
+部分回归先观察到原实现失败再修复，其余是后补覆盖，不能宣称每条断言都独立完成严格 TDD。
 
-真实二进制在隔离网络/文件系统中验证：
+### 替身和隔离边界
 
-- 插件注册、effective_enabled、v0.3.0 版本和本仓库元数据。
-- 匿名资源页 200；匿名管理请求 401。
-- 带测试密钥 status 200、check 202。
-- 缺失、多值、过期的确认版本被拒绝且不入队；正确版本准确入队。
-- 并发入队仅一个请求成功，request 链接数始终为 1。
-- v8 config/plugins 返回直接配置对象，与安装 helper 使用结构一致。
+Worker 测试使用原生产脚本，但 curl/systemctl/runuser 等 OS 边界使用明确替身。安装沙箱执行实际入口及 Worker preflight，但管理 API、systemctl/tmpfiles 为替身；API 结构另由真实官方集成验证。
 
-## 本地回归
+当时本地 namespace 的 cliproxy 是单 UID fixture，不能证明真实降权已验收；目标主机仍需身份/权限验收。没有读取真实管理密钥、安装宿主 unit 或重启宿主主服务。
 
-- 严格 C 编译：`-std=c11 -Wall -Wextra -Werror -O2 -fPIC -shared`。
-- `test_plugin.py`：9 项回归，独立临时目录和编译期状态属主注入，不接触生产 /run。
-- `tests/test_sanitizer.py`：12,000 次有界畸形 ABI 请求，ASan/UBSan 未报告错误；不是完备形式证明。
-- `tests/test_worker.py`：6 项 unittest，包含成功、替换失败、启动失败、恢复失败及重试、TERM/INT/HUP、强杀后离线恢复、低磁盘、版本不匹配、checksum 错误、错误身份、暂存符号链接、归档成员超限、只读 preflight、真实版本探测 timeout 等子场景。
-- `tests/test_install.py`：13 项 unittest，包含首次安装、重复安装、成功卸载、API 拒绝、未注册拒绝、触发器失败恢复、锁竞争、目录缺失与权限、恢复 unit、命令时限及健康等待等子场景。
-- 所有 Shell 文件逐一 bash -n；Python AST 语法校验。
-- 生成的原始 systemd unit 在私有文件系统中以 systemd-analyze verify 检查，不将 ExecStart 改成 true 来掩盖文件缺失。
+## 所有历史结果都不覆盖的保证
 
-部分 regression 先在原实现观察到失败后修复；其余是后补覆盖，不宣称每项断言都单独完成严格 TDD。
+- 没有据此验证生产环境或真实 systemd PID 1 上的安装/升级，没有改变线上服务。
+- v0.3.0 本地记录未运行 aarch64；后续双架构构建/ABI 验证不应反写为当时已完整验收。
+- 未模拟全部 fsync/硬件断电窗口、磁盘损坏、每个归档预算边界或真实 OAuth 迁移。
+- 自动回滚仅恢复二进制，配置/OAuth 及不可逆迁移不能自动安全回滚。
+- 安装器普通异常/信号仅有限恢复；SIGKILL/断电快照需人工处理。
+- JSON 解析不是通用 Unicode JSON 验证器，同源 SHA256 不能独立证明发布者身份。
+- 备份不自动清理失败证据，超预算拒绝升级；安装快照也须人工保留管理。
 
-## 隔离与替身
-
-worker 测试运行未改写生产脚本，但 curl/systemctl/runuser 等 OS 边界用明确测试替身。安装沙箱执行实际入口和 worker preflight，但管理 API、systemctl/tmpfiles 是替身；其 API 数据结构另外由真实官方集成验证。
-
-本地 namespace 的 cliproxy 账户使用单 UID fixture，因此不能据此宣称真实降权已验收；安装器静态校验真实部署服务账户与文件权限，仍需目标主机验收。测试没有读取真实管理密钥、安装真实 systemd unit 或重启宿主服务。
-
-## 明确未覆盖及保留的限制
-
-- 未在生产环境或真实 systemd PID 1 上安装/升级；没有改变用户线上服务。
-- 未运行 aarch64 二进制，不宣称跨架构验收通过。
-- 未模拟所有 fsync/硬件断电窗口、磁盘损坏、每一个归档字节预算边界或真实 OAuth 数据迁移。
-- 更新回滚只恢复二进制。配置、OAuth 和不可逆迁移不能自动安全回滚。
-- 安装器普通异常/信号提供有限恢复；SIGKILL/断电留下的安装快照需人工处理，不宣称安装事务也有全自动崩溃恢复。
-- JSON 解析保证有界结构/分隔符/数字/重复字段/顶层字段校验，不是通用 Unicode JSON 验证器；官方宿主及可信 worker 正常序列化是信任边界。
-- 同源 SHA256 只能发现损坏，不能独立证明发布者身份。
-- 备份不自动清理失败证据；达到预算则拒绝升级，由管理员审查归档。安装快照也需人工保留管理。
-
-## 发布与部署状态
-
-源码交付、Git 推送、CI 和生产部署是不同状态。本文件只记录已经执行的本地验证范围；Actions 是否通过以具体运行记录为准。没有发布 GitHub Release，也没有自动部署。
+本记录不声称已发布 GitHub Release、上架商店或完成生产部署；这些状态须单独回读核实。

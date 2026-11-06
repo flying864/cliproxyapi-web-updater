@@ -1,17 +1,18 @@
-# CPA Web Updater — 官方商店发布格式（v0.5.0）
+# 商店打包与发布
 
-仓库：<https://github.com/flying864/cliproxyapi-web-updater>
+本指南面向维护者，普通用户从 [README](README.md) 开始。当前源码版本为 v0.5.0；文中的 Release 地址和资产名是发布目标，不代表已经发布或上架。
 
-> **发布格式合规不等于店内一键安装。** ZIP 只包含动态库，不安装/升级 root worker、systemd units 或权限。安装器现在保留已有服务可写插件目录；若你仍使用旧 root-owned 不可写目录，商店写入仍会受阻，不自动放宽权限。不要 chmod 777、递归改属主或以 root 运行主程序。
+## 先分清三个环节
 
-## 代码与发布状态
+1. **源码验证**：main/PR 运行完整测试和 amd64/arm64 构建，只生成短期 Actions 产物，不创建 Release。
+2. **发布资产**：推送正式 tag 后，精确 tag commit 的完整验证和双架构构建均成功，才创建 GitHub Release。
+3. **官方登记**：Release 验证完成后，另向官方商店提交 PR；未合并不得称“已上架”。
 
-- main/PR：运行完整验证和 Linux amd64/arm64 原生生产库构建，仅生成短期 Actions 测试产物，**不创建 Release**。
-- tag `v数字.数字.数字`：复用同一套完整验证及双架构构建，均成功后才发布。
-- registry 只有插件元数据，不手工维护版本；实际版本和下载来源是 GitHub 最新正式 Release。
-- 将代码推到 main 既不代表已发布二进制，也不代表已获官方商店合并。
+商店 ZIP **只包含动态库**，不安装/升级 root Worker、systemd 单元或权限。主机初始化仍见 README 的 `--worker-only` 步骤。不要用商店显示的插件版本判断整套后台已升级。v0.5.0 的 Worker 版本注释有更新，协议仍为 1；未来升级仍须核对配套组件，不能默认兼容。
 
-## 验证与版本维护
+## 验证版本和元数据
+
+在源码根目录运行：
 
 ```bash
 python3 -B scripts/check_release_version.py --tag v0.5.0
@@ -19,15 +20,17 @@ python3 -B scripts/validate_registry.py
 python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
 ```
 
-以后升级版本使用 `scripts/bump_version.py`；它同时检查 C metadata、ABI 单测、官方宿主单测、README 标题、worker 注释和可信 runtime 版本六处，拒绝后缀、重复或不一致标记。不会自动更新历史 changelog 或发布说明，需人工审查。正常写入异常会尝试恢复原文件，不能把多文件更新称为断电原子事务。
+以后升级版本时，用 `python3 -B scripts/bump_version.py 新版本号`，将“新版本号”替换为不带 v 的三段数字。它同步 C metadata、ABI 测试、官方宿主测试、README 标题、Worker 注释和 runtime 版本六处，拒绝重复、不一致或带后缀的标记。历史 changelog 和发布说明须人工更新；普通写入失败会尝试恢复，不能保证多文件断电原子性。
 
-完整验证定义在 `.github/workflows/verify-core.yml`：除了商店脚本回归，还执行原 ABI、sanitizer、worker、安装卸载和真实官方 v8.0.56 宿主集成。main 与 tag 复用该文件并 checkout 精确 `github.sha`，不会借用另一个 commit 的绿色状态。
+完整本地命令见[开发指南](docs/DEVELOPMENT.md)。工作流分别为：
 
-`.github/workflows/build-store.yml` 在 `ubuntu-24.04` 与 `ubuntu-24.04-arm` 原生编译最终 `.so`，记录 readelf 符号版本并加载**这一份生产文件**验证 ABI、metadata 和路由注册；然后打包。此冒烟只调用注册方法，不触碰 `/run` 队列。
+- [verify-core.yml](.github/workflows/verify-core.yml)：完整隔离测试及固定官方 v8.0.56 宿主集成。
+- [build-store.yml](.github/workflows/build-store.yml)：Ubuntu 24.04 amd64/arm64 原生构建，记录 ELF 符号依赖，加载最终生产 `.so` 验证 ABI、metadata 和注册，再打包；不触碰 `/run` 队列。
+- [release-plugin.yml](.github/workflows/release-plugin.yml)：两项均成功才获得发布写权限；拒绝覆盖已有 Release，发布后回读状态并下载核对实际字节。
 
-## 发布（需要单独授权）
+## 发布：必须单独授权
 
-推送 tag 会触发公开 Release，属于独立发布动作；普通源码修正不应顺手执行。确认审批、main 验证与变更后才进行：
+**推送 tag 会触发公开发布。** 以下不是普通测试命令，仅在确认授权、目标 commit、版本和验证结果后执行：
 
 ```bash
 python3 -B scripts/check_release_version.py --tag v0.5.0
@@ -35,7 +38,7 @@ git tag -a v0.5.0 -m 'CPA Web Updater v0.5.0'
 git push origin v0.5.0
 ```
 
-若 tag/Release 已存在，不覆盖、不强推，核对原状态或选择新版本。tag 工作流将生成：
+tag/Release 已存在时不覆盖、不强推，应核对原状态或选新版本。预期资产：
 
 ```text
 cpa-updater_0.5.0_linux_amd64.zip
@@ -43,51 +46,40 @@ cpa-updater_0.5.0_linux_arm64.zip
 checksums.txt
 ```
 
-两份 ZIP 都只包含根目录普通文件 `cpa-updater.so`。`checksums.txt` 是 ZIP 的 SHA256，不是 `.so` 的哈希。发布 job 仅在完整验证与整个双架构构建成功后获得 contents:write；它拒绝覆盖已有 Release，发布后回读 tag/资产状态并下载校验实际字节。
+每份 ZIP 只有根目录普通文件 `cpa-updater.so`。`checksums.txt` 是 **ZIP** 的 SHA256，不是 `.so` 的哈希。商店采用 Go 架构名 `arm64`，主程序 Release 包采用 `aarch64`，两者不能混用。
 
-商店使用 Go 架构名 **arm64**，不同于 CLIProxyAPI 主程序 release 的 **aarch64** 包名，不能混用。
+## 发布中断怎么办
 
-## 中断后的人工核对
-
-若发布步骤失败：先查看精确 tag 的 Release 是否不存在、为 draft 或已经公开，以及资产是否齐全。响应丢失不等于发布没有发生。流程不会自动删除或覆盖已有 Release。
+响应丢失不等于未发布。先只读核对精确 tag，检查 Release 是否不存在、为 draft 或已公开，以及资产是否齐全：
 
 ```bash
 gh release view v0.5.0 --repo flying864/cliproxyapi-web-updater --json tagName,isDraft,isPrerelease,assets
 ```
 
-保留日志，在确认原因和获得相应授权后才恢复/删除草稿或重新发布。不要无条件重跑并覆盖。GitHub CLI 普通资产上传使用 draft 再公开，但强杀或网络错误仍需人工判断。
+保留日志，确认原因并取得相应授权后再恢复/删除草稿或重新发布。流程不会自动删除或覆盖已有 Release；不要无条件重跑。强杀、网络中断和 GitHub CLI 上传/公开过程中的不确定状态都需人工核对。
 
 ## 商店源与官方登记
 
-本仓库登记文件：
+本仓库元数据源：
 
 ```text
 https://raw.githubusercontent.com/flying864/cliproxyapi-web-updater/main/registry.json
 ```
 
-该 URL 可读只代表元数据已推送；没有正式 Release 时不能完成资产安装。发布且回读验证成功后，才使用 [OFFICIAL_REGISTRY_PR.md](OFFICIAL_REGISTRY_PR.md) 向官方仓库提交单条记录。不能用本项目的单插件 registry 覆盖官方整个数组，未合并不得称“已上架官方商店”。
+registry 只维护插件元数据；版本和下载来源取自 GitHub 最新正式 Release。URL 可读不代表资产可安装。发布并回读成功后，按[官方登记 PR 模板](OFFICIAL_REGISTRY_PR.md) 提交单条记录；不能替换官方整个数组。不要为测试源覆盖生产 config.yaml 或已有 plugins 配置块。
 
-不要为测试源覆盖生产 config.yaml，也不要替换已有 plugins 配置块。
+## 主机权限与兼容性
 
-## 主机预检和权限限制
+可运行只读预检：
 
 ```bash
 python3 -B scripts/market_preflight.py
 ```
 
-脚本只读取账户、路径属性及权限位，不创建探测文件、不修改权限、不调用 systemctl。它按 owner/group/other 的互斥优先级检查目录和祖先；即使权限位通过，也**不验证 ACL、只读挂载、systemd 沙箱或实际写入**。worker 文件存在不代表它已正确部署或健康。
+它只读账户、路径和权限位，不创建探测文件、不改权限、不调用 systemctl。owner/group/other 按互斥优先级检查；不验证 ACL、只读挂载、systemd 沙箱或实际可写性，Worker 文件存在也不代表部署健康。
 
-官方商店以主服务用户写入 `plugins/<goos>/<goarch>/<id>-v<version>.so`。本版支持保留 `cliproxy:cliproxy 700` 插件目录，root Worker 和私有状态仍在独立可信路径。商店不会初始化 Worker；先执行一次 `sudo bash install.sh --worker-only`，页面协议检查通过后才允许更新。
-商店只更新动态库，不同步 worker。当前版本的 worker 仅更新版本注释，协议不变；未来不能以商店显示版本判断整套主机部署已升级。
+商店以主服务用户写入 `plugins/<goos>/<goarch>/<id>-v<version>.so`。安全的 `cliproxy:cliproxy 700` 插件目录可保留；旧 root-owned 不可写目录仍可能阻止商店安装，不自动放宽权限。禁止 `chmod 777`、递归改属主或用 root 运行主程序。
 
-## 平台与安全范围
+发布库面向 Ubuntu 24.04 glibc，不承诺旧 glibc、Ubuntu 20.04 或 musl 可加载。其他环境须自行源码构建并验收；双架构 ABI 冒烟不等于双架构完整服务验收。原生库与主服务同进程，更新会短暂中断，自动回滚只恢复主程序二进制。其他限制见[安全说明](docs/SECURITY.md)。
 
-- 主机运行条件沿用 README：Linux、glibc、systemd、非 root 主服务、固定目录。没有 Windows/macOS 或 Docker/DSM 支持。
-- 发布二进制保守支持 Ubuntu 24.04 的 glibc 环境。CI 会记录实际 ELF 符号依赖；不承诺 Ubuntu 20.04、任意旧 glibc 或 musl 可加载。需要其他环境时应在对应环境源码构建和验收。
-- 两个架构原生构建/ABI 验证不等于两架构完整生产部署；官方宿主完整集成固定在 amd64 v8.0.56。
-- 同源 SHA256 不能独立抵御发布账号被攻陷。依赖 Actions 固定 commit SHA，后续更新应审核。
-- 原生库与主服务同进程；API 更新会短暂中断。自动恢复只恢复主程序二进制，不覆盖配置/OAuth 数据。
-
-## 历史开发补丁工具
-
-`apply_to_repo.sh` 仅用于历史 v0.4.0 发布文件叠加，不适用于 v0.5.0 运行组件升级。它在本版应明确拒绝，不会把新 Worker/UI 的一部分套进旧源码。直接 clone 当前仓库并按 README 安装即可；确需旧开发补丁时使用已固定的 v0.4.0 源码提交，不修改新工具来绕过版本限制。
+历史开发补丁叠加方式已移除；需要复现旧版时查阅固定版本的 Git 历史，不要混装新旧 UI/Worker。

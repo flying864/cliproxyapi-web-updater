@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bump five markers, restoring ordinary failures; not crash-atomic across files."""
+"""Bump all checked version markers; roll back errors, but not process crashes."""
 import argparse
 import os
 from pathlib import Path

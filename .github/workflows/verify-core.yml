@@ -36,7 +36,7 @@ jobs:
       - name: Syntax, ABI and sanitizer tests
         run: |
           set -euo pipefail
-          for script in install.sh uninstall.sh cliproxy-updater-worker apply_to_repo.sh; do
+          for script in install.sh uninstall.sh cliproxy-updater-worker; do
             bash -n "$script"
           done
           python3 -B test_plugin.py

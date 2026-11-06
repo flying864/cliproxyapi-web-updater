@@ -2,6 +2,9 @@
 const assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const source=fs.readFileSync(require('node:path').join(__dirname,'../cpa-updater.c'),'utf8');
 const html=source.split('static const char *html =')[1].split(';\n')[0].trim().split('\n').map(x=>JSON.parse(x.trim())).join('');
+assert.match(html, /prefers-color-scheme: dark/);
+assert.match(html, /aria-describedby='key-help'/);
+assert.match(html, /<main/);
 assert.equal((html.match(/<button /g)||[]).length,2);
 const nodes={};for(const id of ['key','check','update','current','latest','state','when','detail','connection','release'])nodes[id]={value:'',textContent:'',disabled:false,hidden:false,removeAttribute(k){delete this[k]}};
 let timers=[],pending=[],calls=[],timerId=0;
@@ -18,6 +21,11 @@ await tick(10000);assert.match(nodes.connection.textContent,/重连/);await tick
 await reply({state:'setup_required'});assert.ok(nodes.check.disabled);assert.ok(nodes.update.disabled);
 await tick();await reply({...ready,protocol:2});assert.ok(nodes.check.disabled);
 await tick();await reply(ready);assert.equal(nodes.check.disabled,false);assert.equal(nodes.update.disabled,false);
+assert.equal(nodes.state.textContent,'发现可用更新');
+assert.match(html, /:focus-visible/);
+assert.match(html, /grid-template-columns: 1fr/);
+assert.match(html, /aria-live='polite'/);
+assert.doesNotMatch(html, /localStorage|sessionStorage|innerHTML/);
 assert.equal(nodes.release.href,'https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.56');
 nodes.check.onclick();await flush();pending.shift().reject(new TypeError('POST never reached server'));await flush();await tick();await reply({...ready,pending:false});assert.equal(nodes.check.disabled,false);calls=[];
 nodes.check.onclick();nodes.check.onclick();nodes.update.onclick();await flush();assert.equal(calls.filter(x=>x.options.method==='POST').length,1);

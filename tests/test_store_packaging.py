@@ -1,8 +1,6 @@
-import json
 from pathlib import Path
 import stat
 import struct
-from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
