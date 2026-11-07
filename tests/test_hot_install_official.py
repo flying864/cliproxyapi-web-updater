@@ -32,6 +32,7 @@ PUBLIC = Path('/var/lib/cliproxy-updater-status')
 
 def inside():
     assert os.geteuid() == 0, 'isolated installer must run as root'
+    Path('/tmp').chmod(0o1777)  # private mount must match real Linux temp semantics
     Path('/etc/passwd').write_text('root:x:0:0:root:/root:/bin/bash\ncliproxy:x:1000:1000:fixture:/opt/cliproxyapi:/usr/sbin/nologin\n')
     Path('/etc/group').write_text('root:x:0:\ncliproxy:x:1000:\n')
     for p in [APP, APP / 'plugins', APP / 'auths', STATE, STATE / 'backups', RUN,
