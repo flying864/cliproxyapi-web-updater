@@ -154,7 +154,7 @@ sys.exit(97)
             assert 'Uid:\t1000\t1000\t1000\t1000' in Path(f'/proc/{proc.pid}/status').read_text()
             # Let the official host hash the management key before baseline capture.
             before_plugins = json.loads(api('/v8/management/config/plugins'))
-            before_yaml = api('/v8/management/config/yaml')
+            before_yaml = api('/v8/management/config.yaml')
             protected = [config, data, STATE / 'deployment.json', STATE / 'lock', PUBLIC / 'status.json',
                          Path('/usr/local/libexec/cliproxy-updater-worker'),
                          Path('/usr/local/libexec/cliproxy-updater-runtime.py')]
@@ -180,7 +180,7 @@ sys.exit(97)
                 del comparable['configs']['cpa-updater']['store']
                 assert comparable == before_plugins, 'unrelated plugin configuration changed'
                 if iteration == 1:
-                    installed_yaml = api('/v8/management/config/yaml')
+                    installed_yaml = api('/v8/management/config.yaml')
                     def without_selection(raw):
                         return [line.strip() for line in raw.decode().splitlines()
                                 if line.strip() and not line.strip().startswith(('store:', 'version:'))]
@@ -188,7 +188,7 @@ sys.exit(97)
                     assert stat.S_IMODE(config.stat().st_mode) == 0o660
                     assert (config.stat().st_uid, config.stat().st_gid) == (0, 1000)
                 else:
-                    assert api('/v8/management/config/yaml') == installed_yaml
+                    assert api('/v8/management/config.yaml') == installed_yaml
                 assert snapshot(protected) == baseline, 'config/data/worker/private state changed'
                 listing = json.loads(api('/v8/management/plugins'))
                 own = [p for p in listing['plugins'] if p['id'] == 'cpa-updater']
