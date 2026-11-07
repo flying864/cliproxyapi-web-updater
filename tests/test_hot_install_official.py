@@ -99,7 +99,7 @@ from pathlib import Path
 a=sys.argv[1:]
 with Path('/output/systemctl.jsonl').open('a') as f: f.write(json.dumps(a)+'\\n')
 if len(a)==5 and a[0]=='show' and a[1]=='cliproxyapi.service' and a[2]=='-p' and a[4]=='--value':
- values={'User':'cliproxy','Group':'cliproxy','ExecStart':'{ path=/opt/cliproxyapi/cli-proxy-api ; argv[]=/opt/cliproxyapi/cli-proxy-api --config /opt/cliproxyapi/config.yaml --local-model ; }','MainPID':Path('/run/main.pid').read_text().strip(),'ExecMainStartTimestampMonotonic':Path('/run/main.start').read_text().strip()}
+ values={'User':'cliproxy','Group':'cliproxy','ExecStart':'{ path=/opt/cliproxyapi/cli-proxy-api ; argv[]=/opt/cliproxyapi/cli-proxy-api --config /opt/cliproxyapi/config.yaml --local-model ; ignore_errors=no ; }','MainPID':Path('/run/main.pid').read_text().strip(),'ExecMainStartTimestampMonotonic':Path('/run/main.start').read_text().strip()}
  if a[3] in values: print(values[a[3]]);sys.exit(0)
 if len(a)==3 and a[0]=='is-active' and a[1]=='--quiet':
  if a[2]=='cliproxyapi.service':
@@ -168,7 +168,9 @@ sys.exit(97)
             for iteration in (1, 2):
                 result = subprocess.run(['/bin/bash', '/source/install.sh', '--hot-reload'],
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
-                Path(f'/output/install-{iteration}.log').write_text(result.stdout)
+                log_path = Path(f'/output/install-{iteration}.log')
+                log_path.write_text(result.stdout)
+                log_path.chmod(0o644)  # test evidence, contains no production credentials
                 assert result.returncode == 0, f'installer failed ({result.returncode}): {result.stdout}'
                 assert proc.pid == pid and proc.poll() is None, 'main PID changed or exited'
                 page = api(panel, authenticated=False).decode()
