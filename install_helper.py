@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared, one-shot installer transaction. No daemon or third-party modules."""
 import copy
+import hashlib
 import importlib.util
 import fcntl
 import json
@@ -111,14 +112,16 @@ try:
    st=os.fstat(stream.fileno())
    if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe plugin file')
    sys.stdout.buffer.write(stream.read(20000001))
- elif action=='write':
+ elif action in ('write','create'):
   data=sys.stdin.buffer.read(20000001)
   if len(data)>20000000: raise ValueError('oversized plugin')
   name='.cpa-updater-'+os.urandom(12).hex()
   f=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o755,dir_fd=fd)
   try:
    with os.fdopen(f,'wb') as out: out.write(data);out.flush();os.fsync(out.fileno());os.fchmod(out.fileno(),0o755)
-   os.replace(name,p.name,src_dir_fd=fd,dst_dir_fd=fd);os.fsync(fd)
+   if action=='create': os.link(name,p.name,src_dir_fd=fd,dst_dir_fd=fd,follow_symlinks=False)
+   else: os.replace(name,p.name,src_dir_fd=fd,dst_dir_fd=fd)
+   os.fsync(fd)
   finally:
    try:os.unlink(name,dir_fd=fd)
    except FileNotFoundError:pass
@@ -201,6 +204,19 @@ class API:
         with self.opener.open(req, timeout=timeout) as response:
             data = response.read(2 * 1024 * 1024)
             return data if raw else json.loads(data)
+
+    def conditional(self, path, value=None, etag=None):
+        headers = {'Authorization': 'Bearer ' + self.key, 'Content-Type': 'application/json'}
+        if etag is not None:
+            headers['If-Match'] = etag
+        req = urllib.request.Request(BASE + path, method='GET' if etag is None else 'PUT',
+            data=None if etag is None else json.dumps(value).encode(), headers=headers)
+        with self.opener.open(req, timeout=15) as response:
+            data = response.read(2 * 1024 * 1024)
+            tag = response.headers.get('ETag', '')
+            if not re.fullmatch(r'"[0-9a-f]{64}"', tag):
+                raise RuntimeError('管理 API 未提供强配置 ETag')
+            return json.loads(data) if etag is None else None, tag
 
     def config(self):
         return self.request('/v8/management/config/plugins')
@@ -343,7 +359,162 @@ def initialize_status():
     os.chown(target, 0, grp.getgrnam('cliproxy').gr_gid, follow_symlinks=False)
 
 
-def run(installing, worker_only=False):
+def hot_name(data):
+    # Reserved namespace: 0.0.1.<eight decimal uint32 SHA256 words>.
+    # Each numeric component fits the official host's signed-int64 comparator.
+    digest = hashlib.sha256(data).digest()
+    version = '0.0.1.' + '.'.join(str(int.from_bytes(digest[i:i+4], 'big')) for i in range(0, 32, 4))
+    return version, 'cpa-updater-v' + version + '.so'
+
+
+def hot_identity():
+    pid = ctl('show', 'cliproxyapi.service', '-p', 'MainPID', '--value')
+    start = ctl('show', 'cliproxyapi.service', '-p', 'ExecMainStartTimestampMonotonic', '--value')
+    if not pid.isdecimal() or int(pid) <= 0 or not start.isdecimal() or int(start) <= 0:
+        raise RuntimeError('无法验证主服务 PID/start')
+    return pid, start
+
+
+def hot_panel(path):
+    # Isolated interpreter avoids dlopen caching. Only the read-only panel route
+    # is dispatched; no status/queue/config routes are invoked by native code.
+    code = r'''
+import base64,ctypes as c,json,sys
+class B(c.Structure): _fields_=[('ptr',c.c_void_p),('len',c.c_size_t)]
+CALL=c.CFUNCTYPE(c.c_int,c.c_char_p,c.c_void_p,c.c_size_t,c.POINTER(B))
+FREE=c.CFUNCTYPE(None,c.c_void_p,c.c_size_t)
+SHUT=c.CFUNCTYPE(None)
+class P(c.Structure): _fields_=[('abi',c.c_uint32),('call',CALL),('free',FREE),('shutdown',SHUT)]
+lib=c.CDLL(sys.argv[1]);p=P()
+lib.cliproxy_plugin_init.argtypes=[c.c_void_p,c.POINTER(P)]
+assert lib.cliproxy_plugin_init(None,c.byref(p))==0 and p.abi==1
+req=json.dumps({'Method':'GET','Path':'/v0/resource/plugins/cpa-updater/panel'}).encode(); out=B()
+assert p.call(b'management.handle',req,len(req),c.byref(out))==0
+try: result=json.loads(c.string_at(out.ptr,out.len))['result']
+finally: p.free(out.ptr,out.len)
+assert result['StatusCode']==200
+sys.stdout.buffer.write(base64.b64decode(result['Body'],validate=True))
+p.shutdown()
+'''
+    user = pwd.getpwnam('cliproxy')
+    result = subprocess.run([sys.executable, '-I', '-c', code, str(path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=20,
+        user=user.pw_uid, group=user.pw_gid, extra_groups=[])
+    if not result.stdout:
+        raise RuntimeError('原生插件 panel 为空')
+    return result.stdout
+
+
+def hot_verify(api, path, panel, identity, budget=30):
+    deadline = time.monotonic() + budget
+    while True:
+        if hot_identity() != identity:
+            raise RuntimeError('hot-reload 主服务 PID/start 发生变化；禁止重启回退')
+        try:
+            data = api.request('/v8/management/plugins')
+            validate_registered(data)
+            own = next(p for p in data['plugins'] if p['id'] == 'cpa-updater')
+            if own.get('path') != str(path):
+                raise RuntimeError('实际插件路径不匹配')
+            if api.request('/v0/resource/plugins/cpa-updater/panel', raw=True) != panel:
+                raise RuntimeError('实际 panel 内容不匹配')
+            hot_status(api.request('/v0/management/plugins/cpa-updater/status'))
+            if hot_identity() != identity:
+                raise RuntimeError('主服务身份变化')
+            return
+        except Exception:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.2)
+
+
+def hot_install():
+    if os.geteuid() != 0:
+        raise RuntimeError('必须 root 执行')
+    os.umask(0o077)
+    validate_service()
+    safe_path(STATE, True)
+    safe_path(STATE / 'lock')
+    api = API()
+    here = Path(__file__).resolve().parent
+    with tempfile.TemporaryDirectory(prefix='cpa-hot-') as build:
+        compiled = Path(build) / 'cpa-updater.so'
+        command('gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fPIC', '-shared',
+                str(here / 'cpa-updater.c'), '-o', str(compiled))
+        data = compiled.read_bytes()
+        version, name = hot_name(data)
+        target = APP / 'plugins' / name
+        fd = os.open(STATE / 'lock', os.O_RDWR | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'r+') as locked:
+            st = os.fstat(locked.fileno())
+            if st.st_uid != 0 or st.st_nlink != 1 or not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077:
+                raise RuntimeError('不安全的共同锁')
+            fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if (STATE / 'transaction.json').exists() or (RUN / 'processing').exists():
+                raise RuntimeError('未恢复的 worker 事务')
+            hot_status(api.request('/v0/management/plugins/cpa-updater/status'))
+            persistent = json.loads((PUBLIC / 'status.json').read_text())
+            hot_status(persistent)
+            before, tag = api.conditional('/v8/management/config/plugins')
+            if not isinstance(before, dict):
+                raise RuntimeError('插件配置不是对象')
+            if before.get('enabled') is not True or before.get('configs', {}).get('cpa-updater', {}).get('enabled') is not True:
+                raise RuntimeError('hot-reload 仅升级已启用插件')
+            discovered = api.request('/v8/management/plugins')
+            validate_registered(discovered)
+            if discovered.get('plugins_dir') != str(APP / 'plugins'):
+                raise RuntimeError('插件目录不匹配')
+            old = Path(next(p['path'] for p in discovered['plugins'] if p['id'] == 'cpa-updater'))
+            if old.parent != target.parent or plugin_io(old, 'read') is None:
+                raise RuntimeError('当前插件路径不安全')
+            identity = hot_identity()
+            old_panel = hot_panel(old)
+            hot_verify(api, old, old_panel, identity)
+            existing = plugin_io(target, 'read')
+            if existing is not None and existing != data:
+                raise RuntimeError('不可变 hot 插件内容冲突')
+            if existing is None:
+                plugin_io(target, 'create', data)
+            panel = hot_panel(target)
+            own = copy.deepcopy(before['configs']['cpa-updater'])
+            own.setdefault('store', {})['version'] = version
+            # A queued request is compatible deferred work: no queue/state/worker
+            # writes, no trigger changes, shared lock excludes worker execution.
+            hot_status(api.request('/v0/management/plugins/cpa-updater/status'))
+            written = None
+            try:
+                _, written = api.conditional('/v8/management/config/plugins/configs/cpa-updater', own, tag)
+                current, current_tag = api.conditional('/v8/management/config/plugins')
+                expected = copy.deepcopy(before)
+                expected['configs']['cpa-updater'] = own
+                if current != expected or current_tag != written:
+                    raise RuntimeError('配置发生并发变化')
+                hot_verify(api, target, panel, identity)
+            except BaseException:
+                if written is not None:
+                    # Exact revision CAS: never clobber a concurrent writer.
+                    api.conditional('/v8/management/config/plugins/configs/cpa-updater',
+                                    before['configs']['cpa-updater'], written)
+                    restored, _ = api.conditional('/v8/management/config/plugins')
+                    if restored != before:
+                        raise RuntimeError('配置恢复验证失败')
+                    hot_verify(api, old, old_panel, identity)
+                raise
+            print('hot-reload 已验证：' + str(target) + '；PID/start 未变化；worker/队列保持原样')
+
+
+def hot_status(value):
+    if (not isinstance(value, dict) or type(value.get('protocol')) is not int or
+            value['protocol'] != 1 or
+            value.get('state') not in ('idle', 'ready', 'up_to_date', 'error', 'rolled_back')):
+        raise RuntimeError('hot-reload 需要兼容 protocol=1 的空闲 worker')
+
+
+def run(installing, worker_only=False, hot_reload=False):
+    if hot_reload:
+        if not installing or worker_only:
+            raise RuntimeError('hot-reload 仅支持现有插件的独立安装')
+        return hot_install()
     if os.geteuid() != 0:
         raise RuntimeError('必须 root 执行')
     os.umask(0o077)
@@ -358,6 +529,10 @@ def run(installing, worker_only=False):
     discovered = api.request('/v8/management/plugins')
     if discovered.get('plugins_dir') != str(APP / 'plugins'):
         raise RuntimeError('插件目录不匹配')
+    if installing and not worker_only:
+        own = api.config().get('configs', {}).get('cpa-updater', {})
+        if own.get('store', {}).get('version') or own.get('store', {}).get('release-tag'):
+            raise RuntimeError('存在 store/hot 版本选择；默认 install 拒绝覆盖未被选择的 legacy 插件，请使用 --hot-reload')
     here = Path(__file__).resolve().parent
     approved_deployment = deployment_config(api) if installing else None
     with tempfile.TemporaryDirectory(prefix='cpa-installer-') as build:
@@ -530,9 +705,9 @@ if __name__ == '__main__':
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, interrupted)
     try:
-        if len(sys.argv) not in (2, 3) or sys.argv[1] not in ('install', 'uninstall') or (len(sys.argv) == 3 and (sys.argv[1] != 'install' or sys.argv[2] != '--worker-only')):
-            raise RuntimeError('用法: install.sh [--worker-only] 或 uninstall.sh')
-        run(sys.argv[1] == 'install', worker_only=len(sys.argv) == 3)
+        if len(sys.argv) not in (2, 3) or sys.argv[1] not in ('install', 'uninstall') or (len(sys.argv) == 3 and (sys.argv[1] != 'install' or sys.argv[2] not in ('--worker-only', '--hot-reload'))):
+            raise RuntimeError('用法: install.sh [--worker-only | --hot-reload] 或 uninstall.sh')
+        run(sys.argv[1] == 'install', worker_only='--worker-only' in sys.argv[2:], hot_reload='--hot-reload' in sys.argv[2:])
     except BaseException as exc:
         # Never print HTTP payloads, headers, credentials, or subprocess output.
         print('安装/卸载中止: ' + (str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__), file=sys.stderr)

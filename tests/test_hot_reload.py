@@ -186,6 +186,7 @@ def inside():
                                  'stream': True}).encode(), headers={
                     'Authorization': 'Bearer ' + CLIENT, 'Content-Type': 'application/json'})
             done = False
+            pieces = []
             with urllib.request.urlopen(req, timeout=12) as response:
                 require(response.status == 200, 'stream status')
                 for line in response:
@@ -195,9 +196,11 @@ def inside():
                         else:
                             obj = json.loads(line[6:])
                             if obj.get('choices', [{}])[0].get('delta', {}).get('content'):
+                                pieces.append(obj['choices'][0]['delta']['content'])
                                 record['chunks'] += 1
                                 started.set()
-            require(done and record['chunks'] >= 2, 'truncated or empty downstream SSE')
+            require(done and ''.join(pieces) == ''.join(f'chunk-{i};' for i in range(80)),
+                    'missing, duplicated, reordered or truncated downstream SSE content')
             evidence['traffic']['streams'] += 1
         except Exception as exc:
             evidence['traffic']['errors'].append({'phase': phase, 'kind': 'stream', 'error': str(exc)})

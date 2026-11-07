@@ -6,6 +6,8 @@ on:
     paths:
       - .github/workflows/hot-reload-probe.yml
       - tests/test_hot_reload.py
+      - tests/test_hot_install_official.py
+      - install_helper.py
 permissions:
   contents: read
 jobs:
@@ -30,12 +32,17 @@ jobs:
         run: |
           set -euo pipefail
           sudo python3 -B tests/test_hot_reload.py --binary test-output/cli-proxy-api --binary-sha256 0aa3798effa9a387feba232ef5306d159b0b7312a4a70abd794a7ba6e1e5c079 --output test-output/hot-reload 2>&1 | tee test-output/hot-reload-console.log
+      - name: Exercise real installer against official nonroot process
+        run: |
+          python3 -B tests/test_hot_install.py
+          sudo python3 -B tests/test_hot_install_official.py --binary test-output/cli-proxy-api --output test-output/hot-install
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: hot-reload-evidence
           path: |
             test-output/hot-reload/
+            test-output/hot-install/
             test-output/hot-reload-console.log
           if-no-files-found: error
           retention-days: 7
