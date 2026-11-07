@@ -1,0 +1,52 @@
+name: Pinned old-to-new upgrade rehearsal
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/upgrade-rehearsal.yml
+      - tests/test_upgrade_rehearsal.py
+permissions:
+  contents: read
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: harness
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 9d85507225ac7dd26604de8abfdf28b67b0868d6
+          persist-credentials: false
+          path: old-source
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 31c08eddf0eddb21c4e1f841dc940085c4f1707c
+          persist-credentials: false
+          path: new-source
+      - name: Install test-only tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc python3 curl bubblewrap
+      - name: Verify exact inputs and run cross-commit installer rehearsal
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C old-source rev-parse HEAD)" = 9d85507225ac7dd26604de8abfdf28b67b0868d6
+          test "$(git -C new-source rev-parse HEAD)" = 31c08eddf0eddb21c4e1f841dc940085c4f1707c
+          mkdir -p evidence
+          sudo env CPA_TEST_REAL_UID=1 python3 -B harness/tests/test_upgrade_rehearsal.py \
+            --old-source "$PWD/old-source" --new-source "$PWD/new-source" 2>&1 | tee evidence/upgrade.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: upgrade-rehearsal-evidence
+          path: evidence/upgrade.log
+          if-no-files-found: error
+          retention-days: 7

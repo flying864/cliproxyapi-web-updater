@@ -56,6 +56,12 @@ sudo python3 -B tests/test_official.py --binary test-output/cli-proxy-api --outp
 
 固定基准为 amd64 CLIProxyAPI v8.0.56，涵盖真实插件注册、鉴权、版本确认、并发队列及测试子进程重启后的结果恢复。操作系统边界使用替身的用例与真实宿主集成不能混称；见 [AUDIT](../AUDIT.md)。
 
+## 固定旧版 → 新版安装演练
+
+[升级演练工作流](../.github/workflows/upgrade-rehearsal.yml) 分别检出旧提交 `9d85507225ac7dd26604de8abfdf28b67b0868d6` 与新提交 `31c08eddf0eddb21c4e1f841dc940085c4f1707c`，调用各自未修改的 `install.sh`。测试脚本独立检出，不能把同版本重复安装当成跨版本升级证据。
+
+演练只在 GitHub Ubuntu 24.04 的 bubblewrap 私有文件系统/网络中运行。服务管理和管理 API 使用明确测试替身，真实执行安装脚本、gcc 编译、文件写入及权限操作；不连接生产服务器，也不使用生产密钥。以该工作流精确运行的日志为准，不能据此保证任意线上安装都兼容。
+
 ## CI、版本与发布
 
 - [完整验证工作流](../.github/workflows/verify-core.yml) 供 main/PR 和 tag 复用，检出精确 commit。
