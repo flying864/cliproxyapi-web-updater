@@ -87,6 +87,20 @@ class PanelBrowser(unittest.TestCase):
             self.assertEqual(target.locator('#current').inner_text(), '—')
             self.assertTrue(target.locator('#check').is_disabled())
 
+    def test_late_key_value_connects_without_click_or_input_event(self):
+        # Reproduce a password manager/form restore updating .value silently.
+        # This is not Chromium's protected password-preview implementation.
+        for embedded in [False, True]:
+            with self.subTest(embedded=embedded):
+                self.page.goto(ORIGIN + ('/embedded' if embedded else PANEL))
+                target = self.page.frame_locator('iframe') if embedded else self.page
+                target.locator('#key').evaluate("node => { node.value = 'browser-test-only'; }")
+                self.page.wait_for_timeout(2800)
+                self.assertEqual(target.locator('#current').inner_text(), READY['current'],
+                                 'silent restored key must connect without clicking')
+                self.assertEqual(target.locator('#connection').inner_text(), '已连接')
+                self.assertEqual(self.posts, [], 'opening the panel may only read status')
+
     def test_idle_poll_does_not_toggle_buttons(self):
         self.page.goto(ORIGIN + PANEL)
         self.page.locator('#key').fill('browser-test-only')

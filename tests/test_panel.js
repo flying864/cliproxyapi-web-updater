@@ -16,7 +16,9 @@ const tick=async(ms=2000)=>{const i=timers.findIndex(t=>t.ms===ms);assert.ok(i>=
 const ready={protocol:1,state:'ready',current:'v8.0.55',latest:'v8.0.56',detail:'last result',updated_at:'now'};
 (async()=>{
 assert.ok(nodes.check.disabled);assert.ok(nodes.update.disabled);
-nodes.key.value='secret';nodes.key.oninput();await flush();assert.equal(calls.length,1);
+await tick();assert.equal(calls.length,0,'empty key must not send unauthenticated requests');
+nodes.key.value='secret';await tick();assert.equal(calls.length,1,'silent autofill starts status read');
+nodes.key.oninput();nodes.key.onchange();assert.equal(calls.length,1,'duplicate events do not restart authentication');
 await tick(10000);assert.match(nodes.connection.textContent,/重连/);await tick();
 await reply({state:'setup_required'});assert.ok(nodes.check.disabled);assert.ok(nodes.update.disabled);
 await tick();await reply({...ready,protocol:2});assert.ok(nodes.check.disabled);
@@ -94,6 +96,34 @@ await tick();await reply(ready);assert.equal(nodes.check.disabled,false);
 await tick();nodes.key.value='';nodes.key.oninput();await reply(ready);
 assert.ok(nodes.check.disabled);assert.ok(nodes.update.disabled);
 assert.equal(pending.length,0);assert.equal(posts(),count);
+// Silent key replacement must discard old GET/queued actions, just like input.
+nodes.key.value='third';nodes.key.oninput();await reply(ready);
+await tick();nodes.check.onclick();count=posts();nodes.key.value='silent';
+await reply({...ready,current:'v9.9.99'});
+assert.equal(posts(),count);assert.equal(nodes.current.textContent,'—');
+assert.equal(calls.at(-1).options.headers.Authorization,'Bearer silent');
+await reply(ready);assert.equal(nodes.check.disabled,false);
+// A click immediately after silent replacement cannot submit using stale state.
+nodes.key.value='click-race';nodes.update.onclick();assert.equal(posts(),count);
+assert.equal(calls.at(-1).options.method,'GET');await reply(ready);
+// Clearing without events invalidates a pending response and stops network reads.
+await tick();nodes.key.value='';await reply(ready);
+assert.equal(nodes.current.textContent,'—');assert.equal(nodes.state.textContent,'等待连接');
+assert.ok(nodes.check.disabled);assert.equal(pending.length,0);
+const beforeEmpty=calls.length;await tick();assert.equal(calls.length,beforeEmpty);
+// A change-only fill also wakes the connection; opening never submits a POST.
+nodes.key.value='change-only';nodes.key.onchange();await reply(ready);
+assert.equal(nodes.check.disabled,false);assert.equal(posts(),count);
+// A key changed while confirmation is open must not inherit the old approval.
+context.confirm=()=>{nodes.key.value='confirmation-race';return true};
+nodes.update.onclick();assert.equal(posts(),count,'confirmation key change must not POST');
+assert.equal(calls.at(-1).options.method,'GET');await reply(ready);
+context.confirm=()=>true;
+// Same-value input/change events must preserve a submitted action lock.
+nodes.check.onclick();count=posts();nodes.key.oninput();nodes.key.onchange();
+assert.ok(nodes.check.disabled);assert.equal(posts(),count);
+nodes.key.value='post-replacement';await reply({});
+assert.equal(posts(),count);assert.equal(calls.at(-1).options.method,'GET');await reply(ready);
 for(const c of calls)assert.equal(c.options.credentials,'omit');
-console.log('panel vm: polling stability, queued single POST, click-version binding, worker guards, key isolation, no POST replay, disconnect/recovery, safe links PASS');
+console.log('panel vm: silent autofill, key isolation, polling stability, queued actions, no POST replay PASS');
 })().catch(e=>{console.error(e);process.exitCode=1});
