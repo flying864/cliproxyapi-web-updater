@@ -1,123 +1,106 @@
 # CPA Web Updater v0.5.0
 
-给现有 CLIProxyAPI 增加一个更新页面：**检查更新 → 确认版本 → 立即更新**。后台按需下载、校验、备份和重启，失败时尝试恢复旧二进制；没有常驻更新进程，也不会自动安装新版本。
+给 CLIProxyAPI 管理中心增加一个 **「CPA 一键更新」** 插件：查看版本、检查更新，确认后升级主程序。
 
-这是[第三方项目](https://github.com/flying864/cliproxyapi-web-updater)，不是 CLIProxyAPI 官方安装器。源码、Release、官方商店登记和主机部署是四件不同的事，不能相互替代。
+**不会自动安装更新。** 升级会短暂中断服务，请避开使用高峰。这是第三方插件，不是 CLIProxyAPI 官方安装器。
 
-> **已安装用户更新提示：** [更新命令、重启提醒与验收步骤](docs/UPDATING.md)。本次修复按钮闪烁并优化 UI；旧版 → 新版隔离演练已通过，完整安装仍会短暂重启服务。首次打开需再次点击的问题尚未确认解决。
+> 已经安装过？直接看 [更新插件](docs/UPDATING.md)。最新版修复按钮闪烁、改善密钥自动填充后的连接，并优化手机和桌面布局。
 
-## 快速使用
+## 怎么使用
 
-安装并初始化完成、插件成功加载后，在支持插件菜单的 **CLIProxyAPI 管理中心**中使用：
+1. 登录 **CLIProxyAPI 管理中心**。
+2. 在侧边栏的**插件栏**点击 **「CPA 一键更新」**。
+3. 输入 **管理密钥（Management Key）**，页面会自动连接并读取状态。它不是客户端 API Key。
+4. 点击 **“检查版本”**，查看最新正式版和更新日志。
+5. 需要升级时，点击 **“立即更新”**，核对版本并确认。
+6. 等待服务重连，在右侧查看结果；短暂断线不代表更新失败。
 
-1. 打开并登录你平时使用的管理中心主页面。
-2. 在侧边栏的**插件栏**中点击 **「CPA 一键更新」**，打开版本更新面板，无需手动拼接网址。
-3. 在插件面板输入 **Management Key（管理密钥）**，不是客户端 API Key。插件不会自动读取管理中心保存的密钥。
-4. 点击“检查版本”，查看当前版本、最新正式版和官方更新日志。
-5. 点击“立即更新”，核对弹出的目标版本及短暂中断提醒，确认后开始升级。不要在有关键请求运行时更新。
-6. 等页面重新连接，查看最终结果。服务重启导致的断线本身不代表升级失败。
+插件不保存密钥，也不读取管理中心保存的密钥。刷新后需要重新输入；浏览器若已自动填入可读取的密钥，页面会自动连接。
 
-如果安装后菜单暂未出现，先刷新管理中心，并确认插件已启用、成功加载且管理中心版本支持插件菜单。以下直达路径仅作为备用入口或排查方式，在你信任的管理服务地址后打开（不会绕过管理密钥校验）：
+## 第一次安装
 
-```text
-/v0/resource/plugins/cpa-updater/panel
-```
+### 先确认服务器符合要求
 
-密钥只保存在页面内存，刷新后需要重输。页面只显示最近结果，没有任务中心、历史列表、多服务器管理或手动降级功能。
+本插件用于**已有且正常运行的 CLIProxyAPI**，不会帮你安装主程序。
 
-## 安装
+- Ubuntu 24.04 原生 Linux、systemd，amd64 或 arm64；**不支持 Docker、群晖 DSM、Windows 和 macOS**。
+- 服务名为 `cliproxyapi.service`，以 `cliproxy` 用户和组运行。
+- 程序：`/opt/cliproxyapi/cli-proxy-api`；配置：`/opt/cliproxyapi/config.yaml`。
+- 启动参数中只有一个 `-config` 或 `--config` 指向上述配置，不使用启动包装脚本。
+- 本机管理 API：`127.0.0.1:8317`；管理密钥文件：`/root/cliproxyapi-admin-key`，仅 root 可读。
+- 已安装 Git、gcc、Python 3、curl、Bash 及常见系统工具。脚本不会自动安装缺失依赖。
 
-### 先确认是否适用
+不确定目录和权限是否符合要求？先看 [部署要求](docs/SECURITY.md)，不要用 `chmod 777` 或把主服务改为 root 来绕过检查。
 
-本项目**不安装 CLIProxyAPI 主程序**，只支持符合以下布局的已有主机：
+### 执行安装
 
-| 项目 | 要求 |
-| --- | --- |
-| 系统 | Ubuntu 24.04 原生 Linux、glibc、systemd；amd64 或 arm64 |
-| 主服务 | 正常运行的 `cliproxyapi.service`，明确设置 `User=cliproxy`、`Group=cliproxy` |
-| 程序与配置 | `/opt/cliproxyapi/cli-proxy-api`、`/opt/cliproxyapi/config.yaml` |
-| 启动参数 | 恰好一个 `-config` 或 `--config` 指向上述配置；保留可明确解析的其他参数 |
-| 管理 API | 本机 `127.0.0.1:8317` 可用 |
-| 本机管理密钥 | 已存在于 `/root/cliproxyapi-admin-key`，由 root 控制且仅 root 可读 |
-
-不支持 Docker、DSM、macOS、Windows，也不迁移部署或改 Nginx、SOCKS5/Xray、模型设置。wrapper、多条 ExecStart、重复或含糊的配置参数会被拒绝，不会尝试重写主服务。
-
-目录和配置权限也有要求，安装前请核对[部署与安全边界](docs/SECURITY.md)。**不要为了通过检查而使用 `chmod 777`、递归改属主或让主服务以 root 运行。**
-
-### 首次完整安装
-
-先备份重要数据、审阅源码，再在维护窗口执行。最后一条命令会安装插件和后台组件，并短暂重启主服务：
+先备份重要配置和 OAuth 数据。在服务器终端用 Bash 执行以下命令，**安装会短暂重启主服务**：
 
 ```bash
-git clone https://github.com/flying864/cliproxyapi-web-updater.git
-cd cliproxyapi-web-updater
-python3 -B test_plugin.py
-sudo bash install.sh
+(
+  set -e
+  git clone https://github.com/flying864/cliproxyapi-web-updater.git
+  cd cliproxyapi-web-updater
+  python3 -B test_plugin.py
+  sudo bash install.sh
+  sudo systemctl is-active cliproxyapi.service
+)
 ```
 
-需要 Git（获取源码）、gcc、Python 3 标准库、curl、Bash、systemd 及常见 coreutils/util-linux 命令。缺少依赖会报错，不会自动安装软件。不需要 pip/npm 包、数据库或额外 Web 服务。
+看到测试 `OK`、安装提示“安装已验证完成”和服务 `active` 后，刷新管理中心，从插件栏打开。保留安装输出的备份路径。
 
-### 已经从商店安装了页面
+### 已经从商店安装了页面？
 
-在**同版本源码目录**中初始化后台组件（Worker）：
+商店只安装页面插件，还需要初始化后台组件（Worker）。在**与插件配套的同版本源码目录**中执行：
 
 ```bash
 sudo bash install.sh --worker-only
 ```
 
-该模式不覆盖插件、不改插件配置、不重启主服务；只安装后台脚本、辅助代码、systemd 单元及状态目录。商店只分发动态库，不会安装或同步 root Worker。页面提示未初始化或协议不兼容时，不能直接更新；请管理员核对配套版本。
+此命令不替换页面、不重启主服务。更新页面请看 [更新插件](docs/UPDATING.md)，不要只运行 `--worker-only`。商店安装细节见 [商店说明](STORE_PUBLISHING.md)。
 
-### 卸载
+## 常见问题
 
-在源码目录执行：
+**插件栏没有「CPA 一键更新」？**
+
+刷新管理中心，检查插件是否已启用、成功加载，以及管理中心是否支持插件菜单。需要单独打开页面排查时，可在可信的管理服务地址后加：
+
+```text
+/v0/resource/plugins/cpa-updater/panel
+```
+
+**密钥框有圆点，但一直显示“等待连接”？**
+
+先等几秒；仍不连接时，手动重新粘贴管理密钥。部分浏览器需要用户确认后才会把自动填充的密码交给页面。
+
+**会自动升级吗？**
+
+不会。后台默认开机后检查一次，之后约每七天检查；安装新版本始终需要手动确认。
+
+**失败会恢复所有数据吗？**
+
+不会。主程序升级失败时会尝试恢复旧二进制，**不恢复配置或 OAuth 数据**。升级前请备份，尤其注意新版本可能带来的数据迁移。
+
+**报错或更新后服务没恢复？**
+
+不要反复点击更新、删除备份或队列。保留错误信息，按 [运维与恢复](docs/OPERATIONS.md) 检查日志；分享日志前遮住密钥和账号信息。
+
+## 卸载
+
+在源码目录执行；卸载可能短暂重启服务，保留用户配置、账号和备份：
 
 ```bash
 sudo bash uninstall.sh
 ```
 
-完整卸载可能重启主服务。保留用户配置、账号和备份，不修改插件目录权限；商店安装的版本化 `.so` 仍由商店管理，不会被通配符删除。
-
-## 常见问题
-
-### 会自动更新吗？
-
-不会。默认开机后安排一次检查，之后约每七天检查，带随机延迟；安装必须手动确认。管理员可关闭或恢复定时检查，网页手动检查不受影响：
-
-```bash
-# 关闭
-sudo systemctl disable --now cliproxy-updater-check.timer
-# 恢复
-sudo systemctl enable --now cliproxy-updater-check.timer
-```
-
-### 更新会改动账号或配置吗？
-
-更新器不主动改 API Key、OAuth、代理和主服务启动参数。但新版本主程序可能迁移数据。**自动回滚只恢复二进制，不恢复配置/OAuth，也不能撤销不可逆迁移。** 备份并不等于无损回滚保证。
-
-### 页面断线、报错或恢复失败怎么办？
-
-先等主服务重连，查看最近状态和日志：
-
-```bash
-sudo cat /var/lib/cliproxy-updater-status/status.json
-sudo journalctl -u cliproxy-updater.service -u cliproxy-updater-recover.service -n 100 --no-pager
-```
-
-不要反复点击、删除事务或队列来“解锁”。恢复失败、磁盘不足和备份容量问题的处理见[运维与恢复](docs/OPERATIONS.md)。
-
-### 改过 OAuth 目录后为什么无法更新？
-
-初始化会通过本机管理 API 确认实际 `auth-dir`，保存到 root 私有批准记录。每次升级前重新核对；路径变化会中止。管理员确认新路径合法且没有遗留事务后，用同版本源码重新运行 `sudo bash install.sh --worker-only`。不要手工伪造批准记录。
-
-### 商店无法安装，或页面有了却不能更新？
-
-商店需要主服务用户能写入插件目录，旧的 root-owned 只读布局可能不满足；即使页面安装成功，也仍需单独初始化 Worker。详见[商店打包与发布](STORE_PUBLISHING.md)，不要以放宽整个应用目录权限解决问题。
+商店安装的版本化插件文件仍由商店管理。
 
 ## 更多说明
 
-- [部署与安全边界](docs/SECURITY.md)：目录权限、更新流程、信任边界。
-- [运维与恢复](docs/OPERATIONS.md)：状态位置、故障处理、备份管理。
-- [开发与测试](docs/DEVELOPMENT.md)：本地命令、隔离要求、CI 范围。
-- [验证记录](AUDIT.md)：历史验证及未覆盖内容，不是当前机器的验收报告。
+- [更新插件](docs/UPDATING.md)：更新命令和成功检查。
+- [部署要求](docs/SECURITY.md) · [运维与恢复](docs/OPERATIONS.md)。
+- [开发与测试](docs/DEVELOPMENT.md) · [验证记录](AUDIT.md)。
 - [商店打包与发布](STORE_PUBLISHING.md) · [官方登记 PR 模板](OFFICIAL_REGISTRY_PR.md)。
 - [版本历史](CHANGELOG.md) · [第三方组件及许可](THIRD_PARTY.md)。
+
+仓库更新不会自动更新你的服务器或商店插件；请按安装或更新步骤操作。

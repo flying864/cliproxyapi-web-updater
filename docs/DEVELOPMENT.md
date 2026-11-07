@@ -29,7 +29,11 @@ python -B tests/test_panel_browser.py
 
 视觉参考：[Key Policy 插件](https://github.com/origin652/cpa-plugin-key-policy/tree/c041a48bb5e3c3ab44b24d05fa2a27c77c55caf5/web/src) 的 Quiet Paper 卡片与官方管理中心的暖灰配色。未引入其框架、认证复用或持久化存储；当前主题仍跟随系统明暗设置。
 
-若实际管理中心需点击正文才显示，请记录点击前后的 iframe 请求、尺寸、遮罩和控制台错误，并与直接打开 `/v0/resource/plugins/cpa-updater/panel` 对照。不要将本地未复现写成线上故障已修复。
+### 自动连接修复的验证范围
+
+源码修订 `09c3581` 修复初始化时密钥为空导致轮询停止、随后静默回填密钥仍不连接的问题。新增测试延迟设置输入框 `.value` 且不触发 input/change，在独立页面与普通 iframe 中验证无需点击即可读取状态；修复前两个场景失败，修复后通过。Node 测试还覆盖重复事件、密钥静默更换/清空、排队与已提交请求隔离、确认框边界换密钥。
+
+这不是浏览器真实密码管理器的端到端测试。受保护的密码预览可能显示圆点但不向脚本暴露值，必须由用户授权；插件不绕过此限制、不读取父页面密钥、不新增持久化。若实际宿主仍需点击，记录 iframe 请求、尺寸和控制台错误，并对照直达页面排查。
 
 ## 系统路径与权限测试
 
@@ -59,6 +63,8 @@ sudo python3 -B tests/test_official.py --binary test-output/cli-proxy-api --outp
 ## 固定旧版 → 新版安装演练
 
 [升级演练工作流](../.github/workflows/upgrade-rehearsal.yml) 分别检出旧提交 `9d85507225ac7dd26604de8abfdf28b67b0868d6` 与新提交 `31c08eddf0eddb21c4e1f841dc940085c4f1707c`，调用各自未修改的 `install.sh`。测试脚本独立检出，不能把同版本重复安装当成跨版本升级证据。
+
+[历史演练运行 42395864349](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42395864349) 返回 `PASS upgrade`、`PASS rollback`：验证旧插件备份、新插件字节与页面变化、配置/OAuth 测试文件内容和权限保留；新版写入后触发器启用故障能恢复旧插件、页面与配置。这份记录针对 `9d85507 → 31c08ed`，不能当作后续 `09c3581` 的跨版本演练结果。
 
 演练只在 GitHub Ubuntu 24.04 的 bubblewrap 私有文件系统/网络中运行。服务管理和管理 API 使用明确测试替身，真实执行安装脚本、gcc 编译、文件写入及权限操作；不连接生产服务器，也不使用生产密钥。以该工作流精确运行的日志为准，不能据此保证任意线上安装都兼容。
 
