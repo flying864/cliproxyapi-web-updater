@@ -100,7 +100,7 @@ def plugin_io(path, action, data=None):
     uid = 0 if owner == 0 else user.pw_uid
     gid = 0 if owner == 0 else user.pw_gid
     groups = [] if owner == 0 else os.getgrouplist('cliproxy', user.pw_gid)
-    code = r'''import os,sys,stat,tempfile
+    code = r'''import os,sys,stat,tempfile,json,re,hashlib
 from pathlib import Path
 p=Path(sys.argv[1]); action=sys.argv[2]
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -119,12 +119,39 @@ try:
   f=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o755,dir_fd=fd)
   try:
    with os.fdopen(f,'wb') as out: out.write(data);out.flush();os.fsync(out.fileno());os.fchmod(out.fileno(),0o755)
-   if action=='create': os.link(name,p.name,src_dir_fd=fd,dst_dir_fd=fd,follow_symlinks=False)
+   if action=='create':
+    import ctypes
+    libc=ctypes.CDLL(None,use_errno=True)
+    if libc.renameat2(fd,os.fsencode(name),fd,os.fsencode(p.name),1)!=0:
+     error=ctypes.get_errno();raise OSError(error,os.strerror(error))
    else: os.replace(name,p.name,src_dir_fd=fd,dst_dir_fd=fd)
    os.fsync(fd)
   finally:
    try:os.unlink(name,dir_fd=fd)
    except FileNotFoundError:pass
+ elif action=='quarantine':
+  destination,digest=json.loads(sys.stdin.buffer.read(4096))
+  if not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so',p.name): raise ValueError('unsafe candidate')
+  if not re.fullmatch(re.escape(p.name)+r'\.[0-9a-f]{24}\.rollback-backup',destination) or not re.fullmatch(r'[0-9a-f]{64}',digest): raise ValueError('unsafe backup')
+  def checked(name):
+   try:f=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+   except FileNotFoundError:return None
+   with os.fdopen(f,'rb') as stream:
+    st=os.fstat(stream.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe candidate')
+    if hashlib.sha256(stream.read(20000001)).hexdigest()!=digest: raise ValueError('changed candidate')
+    return st
+  source=checked(p.name); backup=checked(destination)
+  if source is not None:
+   if backup is not None: raise ValueError('backup already exists')
+   now=os.stat(p.name,dir_fd=fd,follow_symlinks=False)
+   if (now.st_ino,now.st_dev)!=(source.st_ino,source.st_dev): raise ValueError('changed candidate')
+   # RENAME_NOREPLACE prevents a concurrent backup from being overwritten.
+   import ctypes
+   libc=ctypes.CDLL(None,use_errno=True)
+   if libc.renameat2(fd,os.fsencode(p.name),fd,os.fsencode(destination),1)!=0:
+    error=ctypes.get_errno();raise OSError(error,os.strerror(error))
+   os.fsync(fd)
  elif action=='delete':
   try:os.unlink(p.name,dir_fd=fd);os.fsync(fd)
   except FileNotFoundError:pass
@@ -488,11 +515,22 @@ def hot_recover(api, record):
             raise RuntimeError('原插件文件丢失')
         panel = hot_panel(old)
         current, tag = api.conditional('/v8/management/config/plugins')
-        if current == record['before']:
-            pass
-        elif current == record['expected']:
-            if tag != record.get('written') and hot_scope(api) != record['scope']:
-                raise RuntimeError('完整配置发生并发变化，拒绝恢复')
+        if current not in (record['before'], record['expected']):
+            raise RuntimeError('插件配置发生并发变化，拒绝恢复')
+        if tag not in (record.get('written'), record.get('tag')) and hot_scope(api) != record['scope']:
+            raise RuntimeError('完整配置发生并发变化，拒绝恢复')
+        # Without an explicit selector the official host discovers versioned
+        # libraries before the legacy path. Hide only this transaction's new
+        # candidate, before restoring/reloading the original configuration.
+        candidate = record.get('candidate')
+        legacy = not record['before']['configs']['cpa-updater'].get('store', {}).get('version')
+        if legacy and candidate and record.get('created'):
+            target = Path(candidate)
+            if (target.parent != old.parent or target == old or
+                    not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so', target.name)):
+                raise RuntimeError('恢复候选路径不安全')
+            plugin_io(target, 'quarantine', json.dumps([record['quarantine'], record['digest']]).encode())
+        if current == record['expected'] or (legacy and candidate and record.get('created')):
             if hot_identity() != identity:
                 raise RuntimeError('主服务身份变化，拒绝恢复写入')
             # Re-read ETag is the CAS fence even when a PUT response was lost.
@@ -501,8 +539,6 @@ def hot_recover(api, record):
             restored, _ = api.conditional('/v8/management/config/plugins')
             if restored != record['before']:
                 raise RuntimeError('恢复配置回读不匹配')
-        else:
-            raise RuntimeError('插件配置发生并发变化，拒绝恢复')
         hot_verify(api, old, panel, identity)
         hot_record_clear()
     except BaseException as exc:
@@ -559,9 +595,9 @@ def hot_install():
             existing = plugin_io(target, 'read')
             if existing is not None and existing != data:
                 raise RuntimeError('不可变 hot 插件内容冲突')
-            if existing is None:
-                plugin_io(target, 'create', data)
-            panel = hot_panel(target)
+            if (existing is not None and target != old and
+                    not before['configs']['cpa-updater'].get('store', {}).get('version')):
+                raise RuntimeError('legacy 无版本选择器且候选已存在；无法证明创建归属，拒绝切换')
             own = copy.deepcopy(before['configs']['cpa-updater'])
             own.setdefault('store', {})['version'] = version
             # A queued request is compatible deferred work: no queue/state/worker
@@ -570,9 +606,15 @@ def hot_install():
             expected = copy.deepcopy(before)
             expected['configs']['cpa-updater'] = own
             record = dict(protocol=1, before=before, expected=expected, path=str(old),
-                          identity=list(identity), tag=tag, scope=hot_scope(api))
+                          identity=list(identity), tag=tag, scope=hot_scope(api),
+                          candidate=str(target), created=existing is None,
+                          quarantine=name + '.' + os.urandom(12).hex() + '.rollback-backup',
+                          digest=hashlib.sha256(data).hexdigest())
             hot_record_write(record)
             try:
+                if existing is None:
+                    plugin_io(target, 'create', data)
+                panel = hot_panel(target)
                 _, written = api.conditional('/v8/management/config/plugins/configs/cpa-updater', own, tag)
                 record['written'] = written
                 hot_record_write(record)

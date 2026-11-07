@@ -36,10 +36,32 @@ class HotInstallTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data), {'enabled': True})
         self.assertEqual(tag, '"' + 'a' * 64 + '"')
 
+    def test_quarantine_real_io_is_idempotent_and_refuses_changed_files(self):
+        from types import SimpleNamespace
+        user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
+        with tempfile.TemporaryDirectory() as directory, patch.object(m, 'plugin_directory'), \
+                patch.object(m.pwd, 'getpwnam', return_value=user), \
+                patch.object(m.os, 'getgrouplist', return_value=[]):
+            target = Path(directory) / m.hot_name(b'new')[1]
+            target.write_bytes(b'new')
+            payload = json.dumps([target.name + '.' + 'a' * 24 + '.rollback-backup', m.hashlib.sha256(b'new').hexdigest()]).encode()
+            m.plugin_io(target, 'quarantine', payload)
+            backup = target.with_name(target.name + '.' + 'a' * 24 + '.rollback-backup')
+            self.assertFalse(target.exists())
+            self.assertEqual(backup.read_bytes(), b'new')
+            m.plugin_io(target, 'quarantine', payload)
+            target.write_bytes(b'concurrent')
+            with self.assertRaises(RuntimeError): m.plugin_io(target, 'quarantine', payload)
+            self.assertEqual(target.read_bytes(), b'concurrent')
+            target.unlink()
+            target.symlink_to(backup)
+            with self.assertRaises(RuntimeError): m.plugin_io(target, 'quarantine', payload)
+            self.assertEqual(backup.read_bytes(), b'new')
+
     def test_pending_is_compatible_deferred_work(self):
         m.hot_status({'protocol': 1, 'state': 'idle', 'pending': True})
 
-    def exercise(self, fail=False, concurrent=False, lost=False, crash=False):
+    def exercise(self, fail=False, concurrent=False, lost=False, crash=False, selected=False, preexisting=False, publish_fail=False, quarantine_crash=False):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
             app = root / 'app'; app.mkdir(); (app / 'plugins').mkdir()
@@ -51,6 +73,9 @@ class HotInstallTests(unittest.TestCase):
             old = app / 'plugins/cpa-updater.so'; old.write_bytes(b'old')
             before = {'enabled': True, 'configs': {'other': {'enabled': True},
                       'cpa-updater': {'enabled': True, 'priority': 17, 'store': {'repository': 'keep'}}}}
+            if selected: before['configs']['cpa-updater']['store']['version'] = '7.0.0'
+            target = app / 'plugins' / m.hot_name(b'new')[1]
+            if preexisting: target.write_bytes(b'new')
             class Fake:
                 def __init__(self):
                     self.config = copy.deepcopy(before); self.tag = 'original'; self.writes = []
@@ -85,11 +110,25 @@ class HotInstallTests(unittest.TestCase):
             stack.enter_context(patch.object(m, 'command', side_effect=compile))
             def io(path, action, data=None):
                 if action == 'read': return path.read_bytes() if path.exists() else None
+                if action == 'quarantine':
+                    destination, digest = json.loads(data)
+                    backup = path.with_name(destination)
+                    if path.exists():
+                        self.assertEqual(m.hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+                        path.rename(backup)
+                        if quarantine_crash: raise SystemExit('crash after quarantine')
+                    return
                 self.assertEqual(action, 'create')
+                self.assertTrue((state / 'hot-transaction.json').exists(), 'candidate published before recovery record')
+                if publish_fail: raise RuntimeError('publish failed')
                 with path.open('xb') as stream: stream.write(data)
             stack.enter_context(patch.object(m, 'plugin_io', side_effect=io))
             def verify(api, path, panel, identity):
                 self.assertEqual(queued.read_bytes(), b'keep request')
+                if path == old and (fail or lost) and not concurrent and not selected and api.writes:
+                    self.assertEqual(list((app / 'plugins').glob('cpa-updater-v*.so')), [],
+                                     'legacy discovery still selects the new candidate')
+                    self.assertEqual(len(list((app / 'plugins').glob('*.rollback-backup'))), 1)
                 if path != old and fail:
                     if concurrent:
                         api.tag = 'concurrent'
@@ -97,6 +136,18 @@ class HotInstallTests(unittest.TestCase):
                     raise RuntimeError('verification failed')
             stack.enter_context(patch.object(m, 'hot_verify', side_effect=verify))
             ctl = stack.enter_context(patch.object(m, 'ctl'))
+            if preexisting or publish_fail or quarantine_crash:
+                with self.assertRaises(RuntimeError): m.hot_install()
+                if quarantine_crash:
+                    self.assertTrue((state / 'hot-transaction.json').exists())
+                    m.hot_install()
+                self.assertEqual(api.config, before)
+                self.assertFalse((state / 'hot-transaction.json').exists())
+                self.assertEqual(old.read_bytes(), b'old')
+                if preexisting:
+                    self.assertEqual(target.read_bytes(), b'new')
+                    self.assertEqual(api.writes, [])
+                return
             if crash:
                 with patch.object(m, 'hot_recover', side_effect=SystemExit('killed')):
                     with self.assertRaises(SystemExit): m.hot_install()
@@ -118,6 +169,18 @@ class HotInstallTests(unittest.TestCase):
             if concurrent and concurrent != 'whole': self.assertEqual(api.config['configs']['other']['priority'], 99)
             self.assertEqual((state / 'hot-transaction.json').exists(), bool(concurrent))
             self.assertEqual(len(api.writes), 2 if (fail or lost) and not concurrent else 1)
+
+    def test_existing_unowned_candidate_refuses_legacy_switch(self):
+        self.exercise(preexisting=True)
+
+    def test_publish_failure_recovers_without_candidate(self):
+        self.exercise(publish_fail=True)
+
+    def test_crash_after_quarantine_recovery_is_idempotent(self):
+        self.exercise(lost=True, quarantine_crash=True)
+
+    def test_version_selected_rollback_retains_candidate(self):
+        self.exercise(lost=True, selected=True)
 
     def test_interrupted_transaction_recovers_on_next_invocation(self):
         self.exercise(lost=True, crash=True)
