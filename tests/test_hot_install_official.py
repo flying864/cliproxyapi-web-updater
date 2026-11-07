@@ -165,6 +165,108 @@ sys.exit(97)
             inode = None
             selected_path = None
             pid = proc.pid
+            start = Path(f'/proc/{pid}/stat').read_text().split()[21]
+            old_path = next(p['path'] for p in json.loads(api('/v8/management/plugins'))['plugins']
+                            if p['id'] == 'cpa-updater')
+            original_library = snapshot([Path(old_path)])
+
+            def service_read_only():
+                assert not list(Path('/etc/systemd/system').iterdir()), 'installer wrote service files'
+                assert not list(Path('/etc/tmpfiles.d').iterdir()), 'installer wrote tmpfiles policy'
+                calls = [json.loads(line) for line in Path('/output/systemctl.jsonl').read_text().splitlines()]
+                assert all(c[0] in ('show', 'is-active') for c in calls), calls
+                assert all(c[3] in ('User', 'Group', 'ExecStart', 'MainPID', 'ExecMainStartTimestampMonotonic')
+                           for c in calls if c[0] == 'show'), calls
+
+            def restored_baseline():
+                assert proc.poll() is None and proc.pid == pid, 'main PID changed or exited'
+                assert Path(f'/proc/{pid}/stat').read_text().split()[21] == start
+                assert api(panel, authenticated=False).decode() == old, 'old page not restored'
+                assert json.loads(api('/v8/management/config/plugins')) == before_plugins, 'old selection not restored'
+                assert api('/v8/management/config.yaml') == before_yaml, 'old YAML not restored'
+                listing = json.loads(api('/v8/management/plugins'))
+                own = [p for p in listing['plugins'] if p['id'] == 'cpa-updater']
+                assert len(own) == 1 and own[0]['path'] == old_path
+                assert own[0]['registered'] and own[0]['effective_enabled']
+                assert snapshot([Path(old_path)]) == original_library, 'old library changed'
+                assert snapshot(protected) == baseline, 'protected state changed'
+                assert stat.S_IMODE(config.stat().st_mode) == 0o660
+                assert (config.stat().st_uid, config.stat().st_gid) == (0, 1000)
+                assert not list((RUN / 'inbox').iterdir()) and not (RUN / 'processing').exists()
+                assert not (STATE / 'transaction.json').exists()
+                assert not (STATE / 'hot-transaction.json').exists(), 'hot recovery record not cleared'
+                assert json.loads(api('/v0/management/plugins/cpa-updater/status')) == dict(status, pending=False)
+                with (STATE / 'lock').open('r+') as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                service_read_only()
+
+            # Fault injection is exclusively at the client return boundary: the
+            # real official server handles the PUT and serves the new panel first.
+            # Neither API responses nor installer transaction logic are mocked.
+            fault_code = r'''
+import json,os,sys,time
+from pathlib import Path
+sys.path.insert(0, '/source')
+import install_helper as installer
+mode = sys.argv[1]
+original = installer.API.conditional
+fired = False
+def conditional(self, path, value=None, etag=None):
+    global fired
+    result = original(self, path, value, etag)
+    if etag is not None and not fired and path.endswith('/configs/cpa-updater'):
+        fired = True
+        deadline = time.monotonic() + 15
+        while True:
+            listing = self.request('/v8/management/plugins')
+            own = next(p for p in listing['plugins'] if p['id'] == 'cpa-updater')
+            page = self.request('/v0/resource/plugins/cpa-updater/panel', raw=True)
+            if own['path'] != '/opt/cliproxyapi/plugins/cpa-updater.so' and b'<title>\xe7\x89\x88\xe6\x9c\xac\xe6\x9b\xb4\xe6\x96\xb0' in page:
+                assert page == installer.hot_panel(Path(own['path']))
+                assert self.config()['configs']['cpa-updater'] == value
+                Path('/output/' + mode + '-applied.json').write_text(json.dumps({
+                    'actual_put_applied': True, 'new_page_served': True,
+                    'selected_path': own['path'], 'mode': mode}))
+                break
+            assert time.monotonic() < deadline, 'actual new selection never became effective'
+            time.sleep(.1)
+        if mode == 'interrupted':
+            os._exit(86)  # no exception handling/finally: durable recovery required
+        raise TimeoutError('injected lost response after actual official-server PUT')
+    return result
+installer.API.conditional = conditional
+installer.hot_install()
+raise AssertionError('fault injection did not fire')
+'''
+            failure_scenarios = []
+            for mode in ('lost-response', 'interrupted'):
+                result = subprocess.run(['/usr/bin/python3', '-c', fault_code, mode],
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                fault_log = Path('/output/' + mode + '.log')
+                fault_log.write_text(result.stdout)
+                fault_log.chmod(0o644)
+                assert result.returncode != 0, 'injected failure unexpectedly succeeded'
+                marker = Path('/output/' + mode + '-applied.json')
+                assert marker.exists(), 'fault was not injected after a verified real PUT'
+                marker.chmod(0o644)
+                assert json.loads(marker.read_text())['actual_put_applied']
+                if mode == 'lost-response':
+                    assert 'injected lost response' in result.stdout, result.stdout
+                else:
+                    assert result.returncode == 86, result.stdout
+                    pending = STATE / 'hot-transaction.json'
+                    assert pending.is_file(), 'crashed installer left no durable recovery record'
+                    assert stat.S_IMODE(pending.stat().st_mode) == 0o600 and pending.stat().st_uid == 0
+                    assert TITLE in api(panel, authenticated=False).decode(), 'crash did not leave new page active'
+                    recovery = subprocess.run(['/bin/bash', '/source/install.sh', '--hot-reload'],
+                                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                    recovery_log = Path('/output/interrupted-recovery.log')
+                    recovery_log.write_text(recovery.stdout)
+                    recovery_log.chmod(0o644)
+                    assert recovery.returncode == 0, recovery.stdout
+                restored_baseline()
+                failure_scenarios.append(dict(mode=mode, actual_put_applied=True, old_page_restored=True,
+                                              old_config_restored=True, pid_preserved=True, service_writes=False))
             for iteration in (1, 2):
                 result = subprocess.run(['/bin/bash', '/source/install.sh', '--hot-reload'],
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
@@ -199,6 +301,9 @@ sys.exit(97)
                 assert not list((RUN / 'inbox').iterdir()), 'installer left a queued request'
                 assert not (RUN / 'processing').exists()
                 assert not (STATE / 'transaction.json').exists()
+                assert not (STATE / 'hot-transaction.json').exists()
+                assert Path(f'/proc/{pid}/stat').read_text().split()[21] == start
+                service_read_only()
                 calls = [json.loads(line) for line in Path('/output/systemctl.jsonl').read_text().splitlines()]
                 assert all(c[0] in ('show', 'is-active') for c in calls), calls
                 assert all(c[3] in ('User', 'Group', 'ExecStart', 'MainPID', 'ExecMainStartTimestampMonotonic') for c in calls if c[0] == 'show'), calls
@@ -219,8 +324,9 @@ sys.exit(97)
                 user=1000, group=1000, extra_groups=[], capture_output=True)
             assert denied.returncode != 0 and b'PermissionError' in denied.stderr
             Path('/output/result.json').write_text(json.dumps(dict(passed=True, main_pid=pid,
-                installs=2, worker_running=False, status_fixture=status, systemctl_calls=calls), indent=2))
-            print('PASS: two real hot installs; new panel, stable nonroot PID, no service mutations; config/data preserved')
+                installs=2, failure_scenarios=failure_scenarios, worker_running=False,
+                status_fixture=status, systemctl_calls=calls), indent=2))
+            print('PASS: real lost-response rollback and interrupted recovery; two real hot installs; stable nonroot PID, no service mutations; config/data preserved')
         finally:
             proc.terminate()
             try:

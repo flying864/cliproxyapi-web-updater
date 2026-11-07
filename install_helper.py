@@ -288,6 +288,8 @@ def units():
 
 
 def idle():
+    if os.path.lexists(STATE / 'hot-transaction.json'):
+        raise RuntimeError('存在 hot-transaction.json；先运行 --hot-reload 恢复，禁止安装/卸载')
     if (STATE / 'transaction.json').exists():
         raise RuntimeError('存在 transaction.json；先执行 systemctl start cliproxy-updater-recover.service 恢复，禁止安装/卸载')
     if (RUN / 'processing').exists() or any(query('is-active', u) for u in SERVICES):
@@ -428,6 +430,85 @@ def hot_verify(api, path, panel, identity, budget=30):
             time.sleep(.2)
 
 
+def hot_record_read():
+    path = STATE / 'hot-transaction.json'
+    if not os.path.lexists(path):
+        return None
+    safe_path(STATE, True)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        st = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_nlink != 1 or
+                stat.S_IMODE(st.st_mode) != 0o600 or st.st_size > 2 * 1024 * 1024):
+            raise RuntimeError('不安全的 hot 恢复记录')
+        record = json.load(stream)
+    if record.get('protocol') != 1:
+        raise RuntimeError('未知 hot 恢复记录版本')
+    return record
+
+
+def hot_sync():
+    fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def hot_record_write(record):
+    safe_path(STATE, True)
+    atomic_write(STATE / 'hot-transaction.json', json.dumps(record).encode(), 0o600)
+    hot_sync()
+
+
+def hot_record_clear():
+    (STATE / 'hot-transaction.json').unlink()
+    hot_sync()
+
+
+def hot_scope(api):
+    # Hash only: never persist management keys or full deployment config.
+    value = api.request('/v8/management/config', raw=False)
+    if not isinstance(value, dict) or 'plugins' not in value:
+        raise RuntimeError('无法取得完整配置以证明恢复范围')
+    value = copy.deepcopy(value)
+    value.pop('plugins')
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def hot_recover(api, record):
+    try:
+        identity = tuple(record['identity'])
+        if hot_identity() != identity:
+            raise RuntimeError('主服务身份变化，拒绝自动恢复')
+        old = Path(record['path'])
+        if old.parent != APP / 'plugins' or old.name in ('', '.', '..'):
+            raise RuntimeError('恢复插件路径不安全')
+        if plugin_io(old, 'read') is None:
+            raise RuntimeError('原插件文件丢失')
+        panel = hot_panel(old)
+        current, tag = api.conditional('/v8/management/config/plugins')
+        if current == record['before']:
+            pass
+        elif current == record['expected']:
+            if tag != record.get('written') and hot_scope(api) != record['scope']:
+                raise RuntimeError('完整配置发生并发变化，拒绝恢复')
+            if hot_identity() != identity:
+                raise RuntimeError('主服务身份变化，拒绝恢复写入')
+            # Re-read ETag is the CAS fence even when a PUT response was lost.
+            api.conditional('/v8/management/config/plugins/configs/cpa-updater',
+                            record['before']['configs']['cpa-updater'], tag)
+            restored, _ = api.conditional('/v8/management/config/plugins')
+            if restored != record['before']:
+                raise RuntimeError('恢复配置回读不匹配')
+        else:
+            raise RuntimeError('插件配置发生并发变化，拒绝恢复')
+        hot_verify(api, old, panel, identity)
+        hot_record_clear()
+    except BaseException as exc:
+        raise RuntimeError('hot 恢复未完成；保留 hot-transaction.json，禁止安装/卸载，请修复后重新运行 --hot-reload') from exc
+
+
 def hot_install():
     if os.geteuid() != 0:
         raise RuntimeError('必须 root 执行')
@@ -439,11 +520,6 @@ def hot_install():
     here = Path(__file__).resolve().parent
     with tempfile.TemporaryDirectory(prefix='cpa-hot-') as build:
         compiled = Path(build) / 'cpa-updater.so'
-        command('gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fPIC', '-shared',
-                str(here / 'cpa-updater.c'), '-o', str(compiled))
-        data = compiled.read_bytes()
-        version, name = hot_name(data)
-        target = APP / 'plugins' / name
         fd = os.open(STATE / 'lock', os.O_RDWR | os.O_NOFOLLOW)
         with os.fdopen(fd, 'r+') as locked:
             st = os.fstat(locked.fileno())
@@ -452,6 +528,16 @@ def hot_install():
             fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if (STATE / 'transaction.json').exists() or (RUN / 'processing').exists():
                 raise RuntimeError('未恢复的 worker 事务')
+            pending = hot_record_read()
+            if pending is not None:
+                hot_recover(api, pending)
+                print('旧 hot 事务已恢复并验证；请重新运行 --hot-reload 执行新升级')
+                return
+            command('gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-fPIC', '-shared',
+                    str(here / 'cpa-updater.c'), '-o', str(compiled))
+            data = compiled.read_bytes()
+            version, name = hot_name(data)
+            target = APP / 'plugins' / name
             hot_status(api.request('/v0/management/plugins/cpa-updater/status'))
             persistent = json.loads((PUBLIC / 'status.json').read_text())
             hot_status(persistent)
@@ -481,9 +567,15 @@ def hot_install():
             # A queued request is compatible deferred work: no queue/state/worker
             # writes, no trigger changes, shared lock excludes worker execution.
             hot_status(api.request('/v0/management/plugins/cpa-updater/status'))
-            written = None
+            expected = copy.deepcopy(before)
+            expected['configs']['cpa-updater'] = own
+            record = dict(protocol=1, before=before, expected=expected, path=str(old),
+                          identity=list(identity), tag=tag, scope=hot_scope(api))
+            hot_record_write(record)
             try:
                 _, written = api.conditional('/v8/management/config/plugins/configs/cpa-updater', own, tag)
+                record['written'] = written
+                hot_record_write(record)
                 current, current_tag = api.conditional('/v8/management/config/plugins')
                 expected = copy.deepcopy(before)
                 expected['configs']['cpa-updater'] = own
@@ -491,22 +583,16 @@ def hot_install():
                     raise RuntimeError('配置发生并发变化')
                 hot_verify(api, target, panel, identity)
             except BaseException:
-                if written is not None:
-                    # Exact revision CAS: never clobber a concurrent writer.
-                    api.conditional('/v8/management/config/plugins/configs/cpa-updater',
-                                    before['configs']['cpa-updater'], written)
-                    restored, _ = api.conditional('/v8/management/config/plugins')
-                    if restored != before:
-                        raise RuntimeError('配置恢复验证失败')
-                    hot_verify(api, old, old_panel, identity)
+                hot_recover(api, record)
                 raise
+            hot_record_clear()
             print('hot-reload 已验证：' + str(target) + '；PID/start 未变化；worker/队列保持原样')
 
 
 def hot_status(value):
     if (not isinstance(value, dict) or type(value.get('protocol')) is not int or
             value['protocol'] != 1 or
-            value.get('state') not in ('idle', 'ready', 'up_to_date', 'error', 'rolled_back')):
+            value.get('state') not in ('idle', 'ready', 'current', 'success', 'up_to_date', 'error', 'rolled_back', 'needs_recheck')):
         raise RuntimeError('hot-reload 需要兼容 protocol=1 的空闲 worker')
 
 
@@ -518,6 +604,8 @@ def run(installing, worker_only=False, hot_reload=False):
     if os.geteuid() != 0:
         raise RuntimeError('必须 root 执行')
     os.umask(0o077)
+    if os.path.lexists(STATE / 'hot-transaction.json'):
+        raise RuntimeError('存在 hot-transaction.json；先运行 --hot-reload 恢复，禁止安装/卸载')
     if installing:
         libexec = WORKER.parent
         safe_path(libexec.parent, True)
@@ -548,6 +636,8 @@ def run(installing, worker_only=False, hot_reload=False):
             # Acquire before touching trigger state, so concurrent installers cannot
             # restore each other's triggers. Recheck after stopping under the same lock.
             fcntl.flock(locked, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.path.lexists(STATE / 'hot-transaction.json'):
+                raise RuntimeError('存在 hot-transaction.json；禁止安装/卸载')
             states = {u: (query('is-enabled', u), query('is-active', u)) for u in TRIGGERS + ['cliproxy-updater-recover.service']}
             snapshots = {}
             changed = False
