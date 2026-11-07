@@ -1,0 +1,41 @@
+name: Official host hot-reload feasibility
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/hot-reload-probe.yml
+      - tests/test_hot_reload.py
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install test-only tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc python3 curl bubblewrap
+      - name: Fetch checksum-pinned official host
+        run: python3 -B tests/fetch_official.py --output test-output/cli-proxy-api
+      - name: Probe live plugin replacement in private namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo python3 -B tests/test_hot_reload.py --binary test-output/cli-proxy-api --binary-sha256 0aa3798effa9a387feba232ef5306d159b0b7312a4a70abd794a7ba6e1e5c079 --output test-output/hot-reload 2>&1 | tee test-output/hot-reload-console.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: hot-reload-evidence
+          path: |
+            test-output/hot-reload/
+            test-output/hot-reload-console.log
+          if-no-files-found: error
+          retention-days: 7
