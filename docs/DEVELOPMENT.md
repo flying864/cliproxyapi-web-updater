@@ -15,6 +15,22 @@ python3 -B tests/test_sanitizer.py
 python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
 ```
 
+## 可选浏览器验收（仅开发环境）
+
+`tests/test_panel_browser.py` 用 gcc 编译当前插件，再从真实 ABI 响应中读取 HTML，以 Chromium 验证无点击首屏、普通 iframe 嵌入、轮询按钮稳定、浅色/深色及 320/390/1280px 布局。状态接口全部使用明确的测试夹具，不连接真实管理服务，也不执行升级；普通 iframe 测试不等于已验证用户部署的管理中心。
+
+在独立开发虚拟环境中安装 `playwright`，并运行 `python -m playwright install chromium` 后执行：
+
+```bash
+python -B tests/test_panel_browser.py
+```
+
+截图保存在忽略目录 `test-output/panel-browser/`。Playwright、Chromium 都不是生产依赖；此可选测试尚未加入完整 CI。Node 标准库测试仍是默认前端回归入口，覆盖轮询中点击排队、重复操作抑制、确认版本绑定、密钥切换隔离及不重放 POST。
+
+视觉参考：[Key Policy 插件](https://github.com/origin652/cpa-plugin-key-policy/tree/c041a48bb5e3c3ab44b24d05fa2a27c77c55caf5/web/src) 的 Quiet Paper 卡片与官方管理中心的暖灰配色。未引入其框架、认证复用或持久化存储；当前主题仍跟随系统明暗设置。
+
+若实际管理中心需点击正文才显示，请记录点击前后的 iframe 请求、尺寸、遮罩和控制台错误，并与直接打开 `/v0/resource/plugins/cpa-updater/panel` 对照。不要将本地未复现写成线上故障已修复。
+
 ## 系统路径与权限测试
 
 需要 bubblewrap 和已授权的 root/非交互 sudo。测试使用私有文件系统/网络隔离；缺少隔离能力应报错，不允许退回宿主直接执行。

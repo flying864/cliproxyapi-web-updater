@@ -27,6 +27,17 @@ assert.match(html, /grid-template-columns: 1fr/);
 assert.match(html, /aria-live='polite'/);
 assert.doesNotMatch(html, /localStorage|sessionStorage|innerHTML/);
 assert.equal(nodes.release.href,'https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.56');
+await tick();
+assert.equal(nodes.check.disabled,false,'background GET must not disable check');
+assert.equal(nodes.update.disabled,false,'background GET must not disable update');
+const beforeQueued=calls.length;
+nodes.check.onclick();nodes.check.onclick();nodes.update.onclick();await flush();
+assert.equal(calls.length,beforeQueued,'action waits for GET instead of overlapping');
+assert.ok(nodes.check.disabled,'queued action locks buttons');
+await reply(ready);
+assert.equal(calls.length,beforeQueued+1,'GET completion dispatches exactly one queued POST');
+assert.equal(calls.at(-1).options.method,'POST');
+await reply({});await tick();await reply({...ready,updated_at:'after queued check'});
 nodes.check.onclick();await flush();pending.shift().reject(new TypeError('POST never reached server'));await flush();await tick();await reply({...ready,pending:false});assert.equal(nodes.check.disabled,false);calls=[];
 nodes.check.onclick();nodes.check.onclick();nodes.update.onclick();await flush();assert.equal(calls.filter(x=>x.options.method==='POST').length,1);
 await reply({message:'queued'});assert.ok(nodes.check.disabled);
@@ -38,5 +49,51 @@ await tick();await reply({...ready,state:'needs_recheck'});assert.equal(nodes.ch
 await tick();await reply(ready);nodes.update.onclick();nodes.check.onclick();nodes.update.onclick();assert.equal(calls.filter(x=>x.options.method==='POST').length,2);assert.match(calls.at(-1).url,/update\?version=v8.0.56$/);
 await reply({});await tick();await reply({...ready,latest:'https://evil.test/<script>'});assert.ok(nodes.release.hidden);
 for(const c of calls){assert.equal(c.options.credentials,'omit');assert.equal(c.options.headers.Authorization,'Bearer secret')}
-console.log('panel vm: initialization, serial polling, both actions, duplicate suppression, disconnect/recovery, safe links PASS');
+// A queued update is bound to the version confirmed at click time, not the next poll.
+await tick();await reply(ready);await tick();
+let confirmation='';context.confirm=message=>{confirmation=message;return true};
+const posts=()=>calls.filter(x=>x.options.method==='POST').length;
+let count=posts();nodes.update.onclick();nodes.update.onclick();
+assert.match(confirmation,/v8.0.56/);assert.equal(posts(),count);
+await reply({...ready,latest:'v8.0.57'});
+assert.equal(posts(),count+1);assert.match(calls.at(-1).url,/update\?version=v8.0.56$/);
+await reply({});assert.ok(nodes.check.disabled);
+await tick();await reply({...ready,latest:'v8.0.57',updated_at:'done'});
+// The fresh GET may veto a queued operation: worker pending, busy, incompatible or offline.
+for(const status of [{...ready,pending:true},{...ready,state:'updating'},{...ready,protocol:2},{...ready,state:'setup_required'},null]){
+  await tick();nodes.check.onclick();count=posts();
+  if(status)await reply(status);
+  else {pending.shift().reject(new TypeError('offline'));await flush()}
+  assert.equal(posts(),count);assert.ok(nodes.check.disabled);assert.ok(nodes.update.disabled);
+  await tick();await reply(ready);
+}
+// A queued update must still be actionable after the pending GET returns.
+for(const state of ['current','needs_recheck','error']){
+  await tick();nodes.update.onclick();count=posts();
+  await reply({...ready,state});
+  assert.equal(posts(),count,'queued update must not dispatch after state becomes '+state);
+  assert.match(nodes.connection.textContent,/未提交/);
+  await tick();await reply(ready);
+}
+// Changing a key invalidates the old GET and cancels unsent actions.
+await tick();nodes.check.onclick();count=posts();
+nodes.key.value='replacement';nodes.key.oninput();assert.ok(nodes.check.disabled);
+await reply({...ready,latest:'v8.0.99'});
+assert.ok(nodes.check.disabled,'old key response cannot authorize replacement');
+assert.notEqual(nodes.latest.textContent,'v8.0.99');assert.equal(posts(),count);
+assert.equal(calls.at(-1).options.headers.Authorization,'Bearer replacement');
+assert.equal(calls.at(-1).options.method,'GET');
+await reply(ready);assert.equal(nodes.check.disabled,false);
+// An already submitted POST is never replayed under a replacement key.
+nodes.check.onclick();count=posts();nodes.key.value='third';nodes.key.oninput();
+await reply({});assert.equal(posts(),count);assert.ok(nodes.check.disabled);
+assert.equal(calls.at(-1).options.method,'GET');
+assert.equal(calls.at(-1).options.headers.Authorization,'Bearer third');
+await reply({...ready,pending:true});assert.ok(nodes.check.disabled);
+await tick();await reply(ready);assert.equal(nodes.check.disabled,false);
+await tick();nodes.key.value='';nodes.key.oninput();await reply(ready);
+assert.ok(nodes.check.disabled);assert.ok(nodes.update.disabled);
+assert.equal(pending.length,0);assert.equal(posts(),count);
+for(const c of calls)assert.equal(c.options.credentials,'omit');
+console.log('panel vm: polling stability, queued single POST, click-version binding, worker guards, key isolation, no POST replay, disconnect/recovery, safe links PASS');
 })().catch(e=>{console.error(e);process.exitCode=1});
