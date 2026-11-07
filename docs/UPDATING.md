@@ -1,58 +1,54 @@
 # 更新插件
 
-这份指南更新 **CPA Web Updater 页面和后台组件**，不升级 CLIProxyAPI 主程序。
+更新 **CPA Web Updater 插件页面**，不升级 CLIProxyAPI 主程序。
 
-本次包含：密钥自动填入后的自动连接、按钮闪烁修复，以及更清晰的手机/桌面界面。
+## 推荐：热更新，不重启主服务
 
-## 1. 更新前
+适用于已通过本仓库安装并初始化的插件，且后台组件兼容 `protocol=1`。已在官方 CLIProxyAPI **v8.0.56 / Ubuntu 24.04 amd64** 上验证。热更新只替换页面插件，保留 Worker、配置和账号数据；不满足条件会停止，**不会自动改成重启安装**。
 
-- 在**原来安装插件的 Ubuntu 24.04 服务器**操作，适用于通过本仓库 `install.sh` 安装的用户。
-- 如果只从商店安装，先看 [商店说明](../STORE_PUBLISHING.md)，不要直接套用本命令。
-- 备份重要配置和 OAuth 数据，避开使用高峰。**安装会短暂重启 CLIProxyAPI，影响正在进行的请求。**
-- 保持 [原安装要求](../README.md#第一次安装) 和依赖；不要为通过检查随意改目录权限。
-
-## 2. 复制执行
-
-在服务器终端用 Bash 执行。命令会新建源码目录，不覆盖旧源码，并锁定本次修复提交。
+在原来的服务器终端用 Bash 执行：
 
 ```bash
 (
   set -e
-
   workdir=$(mktemp -d "$HOME/cliproxy-updater-update.XXXXXX")
   git clone https://github.com/flying864/cliproxyapi-web-updater.git "$workdir"
   cd "$workdir"
-
-  git checkout --detach 09c3581d92fa5b91059fbcd579c93d35c2746635
+  git checkout --detach f9feb32440ed85fbc3edc017a49ec99741a2de95
   python3 -B test_plugin.py
-
-  sudo bash install.sh
+  sudo bash install.sh --hot-reload
   sudo systemctl is-active cliproxyapi.service
 )
 ```
 
-`detached HEAD` 是正常的版本锁定提示。不要加 `--worker-only`，否则不会更新页面。
+`detached HEAD` 是正常的版本锁定提示。热更新期间不要同时在页面点击升级主程序或修改插件配置。
 
-## 3. 检查是否成功
+## 检查是否成功
 
-1. 终端依次出现测试 `OK`、“安装已验证完成”和服务 `active`。**保留安装打印的备份路径。**
+1. 终端出现 **“hot-reload 已验证”** 和 **“PID/start 未变化”**，服务显示 `active`。
 2. 按 **Ctrl + Shift + R** 刷新管理中心，打开 **插件栏 → CPA 一键更新**。
-3. 输入管理密钥，等待版本状态显示；如果密钥已自动填入但仍不连接，手动重新粘贴一次。
-4. 确认“检查版本”按钮不再反复闪烁，并检查原有 API 请求正常。
+3. 输入管理密钥，等待版本状态显示；自动填充后仍不连接时，手动重新粘贴一次。
+4. 检查原有 API 请求正常。不用点击“立即更新”来验收插件，那会升级主程序。
 
-不用点击“立即更新”来验收插件，它会触发主程序升级。
+## 报错怎么办
 
-## 出错怎么办
-
-**停止重复安装，不要卸载或删除备份。** 保留安装报错和备份路径，然后查看：
+- **后台正忙或有未完成任务**：先等待任务结束，不要删除队列、事务或旧插件文件。
+- **提示“旧 hot 事务已恢复并验证”**：这次只恢复了旧插件；确认服务正常后，再运行同一目录中的 `sudo bash install.sh --hot-reload` 执行升级。
+- **提示“hot 恢复未完成”或配置冲突**：停止重复操作，保留 `/var/lib/cliproxy-updater/hot-transaction.json`，按 [运维与恢复](OPERATIONS.md) 排查。不要改用普通安装、卸载或删除恢复记录。
+- **其他错误**：保留终端报错，并查看以下日志；分享前遮住密钥和账号信息。
 
 ```bash
 sudo systemctl is-active cliproxyapi.service
 sudo journalctl -u cliproxyapi.service -n 80 --no-pager
 ```
 
-安装器会尝试恢复旧插件；出现“有限恢复检查通过”表示已执行恢复检查，不是升级成功。需要协助时附上报错，先遮住密钥和账号信息。详细处理见 [运维与恢复](OPERATIONS.md)。
+## 哪些操作仍会重启？
 
-## 技术信息
+- **第一次安装**：使用 `sudo bash install.sh`，会短暂重启主服务。
+- **传统完整安装**：同时安装页面和 Worker，会重启；不适用于已有版本化插件选择的部署，安装器会提示停止。
+- **仅更新后台组件**：管理员核对配套版本后使用 `sudo bash install.sh --worker-only`，不替换页面、不重启主服务。不要用它代替本次页面更新。
+- **网页“立即更新”**：升级 CLIProxyAPI 主程序，仍会短暂中断服务。
 
-本次源码修复为 [`09c3581`](https://github.com/flying864/cliproxyapi-web-updater/commit/09c3581d92fa5b91059fbcd579c93d35c2746635)，插件版本号仍为 `0.5.0`。测试范围、浏览器限制和历史升级演练见 [开发与测试](DEVELOPMENT.md)。
+热更新保留旧插件文件；官方宿主也会保留已加载的旧库映像。不要频繁反复切换或手工清理，维护时再安排正常重启。所有更新仍建议保留重要配置和 OAuth 数据备份。
+
+热更新测试中的请求和流式响应保持正常，但不能保证所有环境、所有插件行为都零中断。商店安装、自定义目录或其他宿主版本请先核对兼容性。[技术验证与边界](DEVELOPMENT.md)。

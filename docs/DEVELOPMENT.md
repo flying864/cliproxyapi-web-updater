@@ -68,6 +68,24 @@ sudo python3 -B tests/test_official.py --binary test-output/cli-proxy-api --outp
 
 演练只在 GitHub Ubuntu 24.04 的 bubblewrap 私有文件系统/网络中运行。服务管理和管理 API 使用明确测试替身，真实执行安装脚本、gcc 编译、文件写入及权限操作；不连接生产服务器，也不使用生产密钥。以该工作流精确运行的日志为准，不能据此保证任意线上安装都兼容。
 
+## 插件热重载验收
+
+[专用工作流](../.github/workflows/hot-reload-probe.yml) 使用固定校验和的官方 v8.0.56 amd64。低层探针 `tests/test_hot_reload.py` 区分同路径替换与不同版本路径加载；在收到首个下游 SSE chunk 后切换，断言完整 80 段内容顺序和结束标志、普通请求成功、PID/starttime 不变，并恢复原页面。模拟上游只在私有网络中提供测试数据，无付费 API。
+
+`tests/test_hot_install_official.py` 在真实 UID/GID 1000 官方进程上执行原始 `install.sh --hot-reload`：旧页面换新、重复安装、配置与文件权限保留、无 systemctl 写操作。故障注入在真实 PUT 已保存且新页面生效后制造响应丢失/进程退出，再验证旧页面、配置、进程身份和持久事务恢复。systemctl 只读查询为测试替身，Worker 使用 protocol-1 idle fixture，不宣称真实 systemd 或真实用户模型验收。
+
+```bash
+python3 -B tests/test_hot_install.py
+sudo python3 -B tests/test_hot_reload.py --binary test-output/cli-proxy-api --binary-sha256 0aa3798effa9a387feba232ef5306d159b0b7312a4a70abd794a7ba6e1e5c079 --output test-output/hot-reload
+sudo python3 -B tests/test_hot_install_official.py --binary test-output/cli-proxy-api --output test-output/hot-install
+```
+
+输出目录需为空。低层探针 exit 0 代表可行，2 代表不支持，1 代表测试失败。早期可行性运行 [42400315903](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42400315903) 验证 320 次普通请求与 4 条流；完整发行应以同提交的最新工作流为准。
+
+最终代码 `f9feb32` 的 [热更新及故障恢复验收](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42402108114) 和 [完整 CI](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42402111233) 均通过。期间发现并修复 legacy 无版本选择回滚仍选中新库的问题：事务先持久化再发布文件，失败时仅隔离本事务创建且哈希匹配的候选文件为非 `.so` 备份，再恢复原配置。旧库和隔离备份不删除。
+
+热加载只针对当前 C 页面插件，不泛化为任意插件零中断。官方宿主在主进程内运行 native 插件、保留退休动态库，不是进程级故障隔离；反复更新有资源累积成本。不同宿主版本、arm64 实际热切换、真实 OAuth/provider 需另外验证。
+
 ## CI、版本与发布
 
 - [完整验证工作流](../.github/workflows/verify-core.yml) 供 main/PR 和 tag 复用，检出精确 commit。
