@@ -93,6 +93,14 @@ sudo python3 -B tests/test_hot_install_official.py --binary test-output/cli-prox
 
 热加载只针对当前 C 页面插件，不泛化为任意插件零中断。官方宿主在主进程内运行 native 插件、保留退休动态库，不是进程级故障隔离；反复更新有资源累积成本。不同宿主版本、arm64 实际热切换、真实 OAuth/provider 需另外验证。
 
+## 成功后清理验收
+
+代码 `9ef47bc` 的 [GitHub 连续热更新验收](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42445721330) 与 [完整 CI](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42445723915) 通过。真实官方非 root 宿主依次安装四个构建并各重复一次：已登记的当前/上一版保留，legacy、未知同命名文件和隔离备份未删除；PID/start、配置、数据与队列保持不变。
+
+`tests/test_hot_cleanup.py` 检查私有归属、文件摘要/链接、引用与活动事务保护及警告语义。`tests/test_update_command.py` 使用模拟下载/安装命令，但实际创建和删除临时目录，验证成功清理、失败保留、只恢复旧事务、健康失败、源码身份/标记篡改及清理失败返回成功。更新脚本不扫描旧目录；生产环境尚未通过此脚本操作。
+
+清理发生在热安装成功验证并清除事务之后，仍持有公共锁；`hot-owned.json` root/0600 记录归属及 current/previous。仅服务身份执行单文件摘要复核与删除。未知配置保守跳过；先放弃旧文件归属再删除，失败最多留下文件，不会扩大未来删除权限。清理不涉及配置/OAuth、完整安装备份或主程序升级备份，也不卸载主进程内已驻留的动态库。
+
 ## CI、版本与发布
 
 - [完整验证工作流](../.github/workflows/verify-core.yml) 供 main/PR 和 tag 复用，检出精确 commit。
