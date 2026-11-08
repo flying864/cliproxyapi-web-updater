@@ -44,6 +44,8 @@ jobs:
           node tests/test_panel.js
           node tests/test_panel_auth.js
           python3 -B tests/test_hot_install.py
+          python3 -B tests/test_hot_cleanup.py
+          python3 -B tests/test_update_command.py
       - name: Isolated worker and installer regressions
         run: |
           sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_worker.py

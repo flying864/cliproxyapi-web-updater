@@ -152,6 +152,18 @@ try:
    if libc.renameat2(fd,os.fsencode(p.name),fd,os.fsencode(destination),1)!=0:
     error=ctypes.get_errno();raise OSError(error,os.strerror(error))
    os.fsync(fd)
+ elif action=='prune':
+  digest=sys.stdin.buffer.read(65).decode()
+  if not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so',p.name) or not re.fullmatch(r'[0-9a-f]{64}',digest): raise ValueError('unsafe owned candidate')
+  try:f=os.open(p.name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+  except FileNotFoundError:sys.exit(0)
+  with os.fdopen(f,'rb') as stream:
+   st=os.fstat(stream.fileno())
+   if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe owned candidate')
+   if hashlib.sha256(stream.read(20000001)).hexdigest()!=digest: raise ValueError('changed owned candidate')
+   now=os.stat(p.name,dir_fd=fd,follow_symlinks=False)
+   if (now.st_dev,now.st_ino,now.st_nlink)!=(st.st_dev,st.st_ino,1): raise ValueError('replaced owned candidate')
+   os.unlink(p.name,dir_fd=fd);os.fsync(fd)
  elif action=='delete':
   try:os.unlink(p.name,dir_fd=fd);os.fsync(fd)
   except FileNotFoundError:pass
@@ -540,9 +552,106 @@ def hot_recover(api, record):
             if restored != record['before']:
                 raise RuntimeError('恢复配置回读不匹配')
         hot_verify(api, old, panel, identity)
+        if 'owned_before' in record:
+            hot_owned_write(record['owned_before'])
         hot_record_clear()
     except BaseException as exc:
         raise RuntimeError('hot 恢复未完成；保留 hot-transaction.json，禁止安装/卸载，请修复后重新运行 --hot-reload') from exc
+
+
+def hot_owned_read() -> dict:
+    path = STATE / 'hot-owned.json'
+    if not os.path.lexists(path):
+        return dict(protocol=1, owned={}, current=None, previous=None)
+    safe_path(STATE, True)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        st = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_nlink != 1 or
+                stat.S_IMODE(st.st_mode) != 0o600 or st.st_size > 2 * 1024 * 1024):
+            raise RuntimeError('不安全的 hot 归属清单')
+        value = json.load(stream)
+    if (not isinstance(value, dict) or value.get('protocol') != 1 or
+            not isinstance(value.get('owned'), dict) or
+            not {'current', 'previous'} <= value.keys()):
+        raise RuntimeError('未知 hot 归属清单')
+    for name, digest in value['owned'].items():
+        if (not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so', name) or
+                not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+            raise RuntimeError('无效 hot 归属记录')
+    for key in ('current', 'previous'):
+        if value[key] is not None and (not isinstance(value[key], str) or Path(value[key]).parent != APP / 'plugins'):
+            raise RuntimeError('无效 hot 保留路径')
+    return value
+
+
+def hot_owned_write(value):
+    safe_path(STATE, True)
+    atomic_write(STATE / 'hot-owned.json', json.dumps(value).encode(), 0o600)
+    hot_sync()
+
+
+def hot_cleanup(api, target, old, identity, expected, tag, scope):
+    """Caller holds the common lock; only reached after successful verification."""
+    try:
+        value = hot_owned_read()
+        if target != old:
+            value['previous'] = str(old)
+        value['current'] = str(target)
+        # Persist retention before any deletion. A failed write must not prune.
+        hot_owned_write(value)
+        keep = {value['current'], value['previous']}
+        def fence():
+            if any(os.path.lexists(p) for p in (STATE / 'transaction.json', STATE / 'hot-transaction.json', RUN / 'processing')):
+                raise RuntimeError('存在活动事务，跳过清理')
+            if hot_identity() != identity:
+                raise RuntimeError('主服务身份变化，跳过清理')
+            current, current_tag = api.conditional('/v8/management/config/plugins')
+            if current != expected or current_tag != tag or hot_scope(api) != scope:
+                raise RuntimeError('配置变化，跳过清理')
+            discovered = api.request('/v8/management/plugins')
+            validate_registered(discovered)
+            if (discovered.get('plugins_dir') != str(APP / 'plugins') or
+                    next(p['path'] for p in discovered['plugins'] if p['id'] == 'cpa-updater') != str(target)):
+                raise RuntimeError('加载路径变化，跳过清理')
+            for plugin in discovered['plugins']:
+                if not isinstance(plugin.get('path'), str):
+                    raise RuntimeError('未知插件路径，跳过清理')
+                keep.add(plugin['path'])
+        fence()
+        # Protect every configuration, including disabled plugin selectors.
+        if not isinstance(expected.get('configs'), dict) or set(expected) - {'enabled', 'configs'}:
+            raise RuntimeError('未知插件配置，跳过清理')
+        for plugin_id, config in expected['configs'].items():
+            if not isinstance(config, dict) or not re.fullmatch(r'[A-Za-z0-9_-]+', plugin_id):
+                raise RuntimeError('未知插件配置，跳过清理')
+            store = config.get('store', {})
+            if not isinstance(store, dict) or set(store) - {'version'}:
+                raise RuntimeError('未知 store 配置，跳过清理')
+            version = store.get('version')
+            if version is not None:
+                if not isinstance(version, str) or not re.fullmatch(r'[A-Za-z0-9.+_-]+', version):
+                    raise RuntimeError('未知版本引用，跳过清理')
+                keep.add(str(APP / 'plugins' / (plugin_id + '-v' + version + '.so')))
+            for key in config:
+                if key not in ('enabled', 'priority', 'config', 'store'):
+                    raise RuntimeError('未知插件配置字段，跳过清理')
+            # Opaque plugin-specific configuration may contain path references.
+            if config.get('config'):
+                raise RuntimeError('存在不透明插件配置，跳过清理')
+        for name, digest in list(value['owned'].items()):
+            path = APP / 'plugins' / name
+            if str(path) in keep:
+                continue
+            fence()
+            # Forget durably first: crashes/write failures can leak, never expand ownership.
+            reduced = copy.deepcopy(value)
+            del reduced['owned'][name]
+            hot_owned_write(reduced)
+            value = reduced
+            plugin_io(path, 'prune', digest.encode())
+    except Exception as exc:
+        print('警告：hot 插件清理跳过/未完成：' + str(exc), file=sys.stderr)
 
 
 def hot_install():
@@ -610,8 +719,21 @@ def hot_install():
                           candidate=str(target), created=existing is None,
                           quarantine=name + '.' + os.urandom(12).hex() + '.rollback-backup',
                           digest=hashlib.sha256(data).hexdigest())
+            owned = None
+            try:
+                owned = hot_owned_read()
+                record['owned_before'] = copy.deepcopy(owned)
+            except Exception as exc:
+                print('警告：归属清单不可用，保留所有旧插件：' + str(exc), file=sys.stderr)
             hot_record_write(record)
             try:
+                if existing is None and owned is not None:
+                    owned['owned'][name] = record['digest']
+                    try:
+                        hot_owned_write(owned)
+                    except Exception as exc:
+                        owned = None
+                        print('警告：无法登记插件归属，跳过清理：' + str(exc), file=sys.stderr)
                 if existing is None:
                     plugin_io(target, 'create', data)
                 panel = hot_panel(target)
@@ -628,6 +750,8 @@ def hot_install():
                 hot_recover(api, record)
                 raise
             hot_record_clear()
+            if owned is not None:
+                hot_cleanup(api, target, old, identity, expected, written, record['scope'])
             print('hot-reload 已验证：' + str(target) + '；PID/start 未变化；worker/队列保持原样')
 
 

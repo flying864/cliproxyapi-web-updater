@@ -238,6 +238,10 @@ installer.API.conditional = conditional
 installer.hot_install()
 raise AssertionError('fault injection did not fire')
 '''
+            def without_selection(raw):
+                return [line.strip() for line in raw.decode().splitlines()
+                        if line.strip() and not line.strip().startswith(('store:', 'version:'))]
+
             failure_scenarios = []
             for mode in ('lost-response', 'interrupted'):
                 result = subprocess.run(['/usr/bin/python3', '-c', fault_code, mode],
@@ -285,9 +289,6 @@ raise AssertionError('fault injection did not fire')
                 assert comparable == before_plugins, 'unrelated plugin configuration changed'
                 if iteration == 1:
                     installed_yaml = api('/v8/management/config.yaml')
-                    def without_selection(raw):
-                        return [line.strip() for line in raw.decode().splitlines()
-                                if line.strip() and not line.strip().startswith(('store:', 'version:'))]
                     assert without_selection(installed_yaml) == without_selection(before_yaml), 'unrelated YAML changed'
                     assert stat.S_IMODE(config.stat().st_mode) == 0o660
                     assert (config.stat().st_uid, config.stat().st_gid) == (0, 1000)
@@ -316,6 +317,79 @@ raise AssertionError('fault injection did not fire')
                     assert Path(own[0]['path']) == selected_path
                     assert snapshot([selected_path]) == installed
                     assert selected_path.stat().st_ino == inode, 'idempotent install replaced identical library'
+            # Unregistered files are not installer-owned, even if their names
+            # match its content-addressed namespace. Never prune by glob alone.
+            unknown = APP / ('plugins/cpa-updater-v0.0.1.' + '.'.join(['4294967295'] * 8) + '.so')
+            shutil.copyfile('/old.so', unknown)
+            unknown.chmod(0o755)
+            rollback_backup = selected_path.with_name(selected_path.name + '.' + 'a' * 24 + '.rollback-backup')
+            shutil.copyfile(selected_path, rollback_backup)
+            preserved_libraries = snapshot([Path(old_path), unknown, rollback_backup])
+            owned_paths = [selected_path]
+            owned_hashes = {str(selected_path): hashlib.sha256(selected_path.read_bytes()).hexdigest()}
+            upgrades = []
+            for label in ('B', 'C', 'D'):
+                variant = Path('/run/variant-' + label)
+                shutil.copytree('/source', variant, ignore=shutil.ignore_patterns('.git', '__pycache__'))
+                variant_title = TITLE.replace('</title>', ' ' + label + '</title>')
+                source_file = variant / 'cpa-updater.c'
+                source_text = source_file.read_text()
+                assert source_text.count(TITLE) == 1
+                source_file.write_text(source_text.replace(TITLE, variant_title))
+                assert (variant / 'install_helper.py').read_bytes() == Path('/source/install_helper.py').read_bytes()
+                for repeat in (False, True):
+                    before_repeat = snapshot(list((APP / 'plugins').iterdir())) if repeat else None
+                    before_inodes = {str(p): p.stat().st_ino for p in (APP / 'plugins').iterdir()} if repeat else None
+                    before_repeat_yaml = api('/v8/management/config.yaml') if repeat else None
+                    result = subprocess.run(['/bin/bash', str(variant / 'install.sh'), '--hot-reload'],
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+                    log_path = Path('/output/install-' + label + ('-repeat' if repeat else '') + '.log')
+                    log_path.write_text(result.stdout)
+                    log_path.chmod(0o644)
+                    assert result.returncode == 0, result.stdout
+                    assert variant_title in api(panel, authenticated=False).decode(), 'new build not served'
+                    listing = json.loads(api('/v8/management/plugins'))
+                    own = [p for p in listing['plugins'] if p['id'] == 'cpa-updater']
+                    assert len(own) == 1 and own[0]['registered'] and own[0]['effective_enabled'], listing
+                    live_path = Path(own[0]['path'])
+                    live_hash = hashlib.sha256(live_path.read_bytes()).hexdigest()
+                    if not repeat:
+                        assert live_path not in owned_paths and live_hash not in owned_hashes.values()
+                        owned_paths.append(live_path)
+                        owned_hashes[str(live_path)] = live_hash
+                    else:
+                        assert live_path == owned_paths[-1]
+                        assert snapshot(list((APP / 'plugins').iterdir())) == before_repeat, 'repeat changed library files'
+                        assert {str(p): p.stat().st_ino for p in (APP / 'plugins').iterdir()} == before_inodes
+                        assert api('/v8/management/config.yaml') == before_repeat_yaml
+                    # Count only positively observed successful installs; unknown
+                    # and legacy files deliberately make total file counts larger.
+                    survivors = [p for p in owned_paths if p.exists()]
+                    assert survivors == owned_paths[-2:], 'owned cleanup must retain current and previous only'
+                    for p in survivors:
+                        assert hashlib.sha256(p.read_bytes()).hexdigest() == owned_hashes[str(p)]
+                    assert snapshot([Path(old_path), unknown, rollback_backup]) == preserved_libraries
+                    current_plugins = json.loads(api('/v8/management/config/plugins'))
+                    assert current_plugins['configs']['cpa-updater']['store']['version'] == live_path.name[len('cpa-updater-v'):-3]
+                    comparable = json.loads(json.dumps(current_plugins))
+                    del comparable['configs']['cpa-updater']['store']
+                    assert comparable == before_plugins, 'unrelated plugin configuration changed'
+                    assert without_selection(api('/v8/management/config.yaml')) == without_selection(before_yaml)
+                    assert stat.S_IMODE(config.stat().st_mode) == 0o660
+                    assert (config.stat().st_uid, config.stat().st_gid) == (0, 1000)
+                    assert snapshot(protected) == baseline, 'data/worker/private state changed'
+                    assert not list((RUN / 'inbox').iterdir()) and not (RUN / 'processing').exists()
+                    assert not (STATE / 'transaction.json').exists()
+                    assert not (STATE / 'hot-transaction.json').exists()
+                    assert json.loads(api('/v0/management/plugins/cpa-updater/status')) == dict(status, pending=False)
+                    # Check identity after all readbacks, not merely installer exit.
+                    assert proc.poll() is None and proc.pid == pid
+                    assert Path(f'/proc/{pid}/stat').read_text().split()[21] == start
+                    service_read_only()
+                    upgrades.append(dict(build=label, repeat=repeat, selected_path=str(live_path),
+                                         sha256=live_hash, retained_owned=[str(p) for p in survivors],
+                                         owned_hashes=dict(owned_hashes)))
+            calls = [json.loads(line) for line in Path('/output/systemctl.jsonl').read_text().splitlines()]
             # The shared worker/installer lock is released, and remains private.
             with (STATE / 'lock').open('r+') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -324,9 +398,11 @@ raise AssertionError('fault injection did not fire')
                 user=1000, group=1000, extra_groups=[], capture_output=True)
             assert denied.returncode != 0 and b'PermissionError' in denied.stderr
             Path('/output/result.json').write_text(json.dumps(dict(passed=True, main_pid=pid,
-                installs=2, failure_scenarios=failure_scenarios, worker_running=False,
+                installs=2 + len(upgrades), upgrades=upgrades,
+                preserved_libraries=[str(p) for p in (Path(old_path), unknown, rollback_backup)],
+                failure_scenarios=failure_scenarios, worker_running=False,
                 status_fixture=status, systemctl_calls=calls), indent=2))
-            print('PASS: real lost-response rollback and interrupted recovery; two real hot installs; stable nonroot PID, no service mutations; config/data preserved')
+            print('PASS: real rollback/recovery; four distinct builds with repeat installs; current+previous owned cleanup; unknown/legacy/backups preserved; stable nonroot PID, no service mutations; config/data preserved')
         finally:
             proc.terminate()
             try:
