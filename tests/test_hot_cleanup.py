@@ -35,7 +35,7 @@ class CleanupTests(unittest.TestCase):
                 path = plugins / m.hot_name(data)[1]; path.write_bytes(data); paths.append(path)
             oldest, previous, current, unknown = paths
             value = {'protocol': 1, 'owned': {p.name: m.hashlib.sha256(p.read_bytes()).hexdigest() for p in paths[:3]}, 'current': str(current), 'previous': str(previous)}
-            config = {'enabled': True, 'configs': {'cpa-updater': {'enabled': True, 'store': {'version': m.hot_name(b'current')[0]}}}}
+            config = {'enabled': True, 'dir': str(plugins), 'configs': {'cpa-updater': {'enabled': True, 'store': {'version': m.hot_name(b'current')[0]}}}}
             if block == 'reference': config['configs']['cpa-updater']['store']['version'] = m.hot_name(b'oldest')[0]
             if block == 'unknown': config['configs']['cpa-updater']['mystery'] = 'keep'
             class API:

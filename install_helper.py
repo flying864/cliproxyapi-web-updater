@@ -620,7 +620,9 @@ def hot_cleanup(api, target, old, identity, expected, tag, scope):
                 keep.add(plugin['path'])
         fence()
         # Protect every configuration, including disabled plugin selectors.
-        if not isinstance(expected.get('configs'), dict) or set(expected) - {'enabled', 'configs'}:
+        if (not isinstance(expected.get('configs'), dict) or
+                set(expected) - {'enabled', 'configs', 'dir', 'store-sources', 'store-auth', 'auth-revision'} or
+                expected.get('dir', str(APP / 'plugins')) != str(APP / 'plugins')):
             raise RuntimeError('未知插件配置，跳过清理')
         for plugin_id, config in expected['configs'].items():
             if not isinstance(config, dict) or not re.fullmatch(r'[A-Za-z0-9_-]+', plugin_id):
