@@ -27,7 +27,7 @@ class UpdateCommandTests(unittest.TestCase):
 
     def test_success_removes_only_created_directory(self):
         m = self.load()
-        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as home:
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home:
             unrelated = Path(home) / 'cliproxy-updater-update.keep'
             unrelated.mkdir()
             calls = []
@@ -45,7 +45,7 @@ class UpdateCommandTests(unittest.TestCase):
 
     def exercise(self, mode='success', nonroot=False):
         m = self.load()
-        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as home:
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home:
             calls = []
             def run(argv, **kwargs):
                 calls.append(argv)
@@ -108,7 +108,7 @@ class UpdateCommandTests(unittest.TestCase):
 
     def test_cleanup_refuses_tampered_marker_and_symlink(self):
         m = self.load()
-        with tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']) as home, mock.patch.object(m.Path, 'home', return_value=Path(home)):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home, mock.patch.object(m.Path, 'home', return_value=Path(home)):
             root, record = m.create_source()
             self.assertEqual(root.stat().st_mode & 0o777, 0o700)
             (root / m.MARKER).write_text('{}')
