@@ -199,7 +199,11 @@ sys.exit(97)
                 assert Path(f'/proc/{pid}/stat').read_text().split()[21] == start
                 assert api(panel, authenticated=False).decode() == old, 'old page not restored'
                 assert json.loads(api('/v8/management/config/plugins')) == before_plugins, 'old selection not restored'
-                assert api('/v8/management/config.yaml') == before_yaml, 'old YAML not restored'
+                restored_yaml = api('/v8/management/config.yaml')
+                if restored_yaml != before_yaml:
+                    import difflib
+                    raise AssertionError('old YAML not restored (synthetic fixture only):\n' + ''.join(
+                        difflib.unified_diff(before_yaml.decode().splitlines(True), restored_yaml.decode().splitlines(True))))
                 listing = json.loads(api('/v8/management/plugins'))
                 own = [p for p in listing['plugins'] if p['id'] == 'cpa-updater']
                 assert len(own) == 1 and own[0]['path'] == old_path
