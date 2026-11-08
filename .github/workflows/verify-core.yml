@@ -36,6 +36,7 @@ jobs:
           python3 -B tests/test_sanitizer.py
           node tests/test_panel.js
           node tests/test_panel_auth.js
+          python3 -B tests/test_private_json.py
           python3 -B tests/test_hot_install.py
           python3 -B tests/test_hot_cleanup.py
           python3 -B tests/test_update_command.py

@@ -494,10 +494,14 @@ def hot_sync():
         os.close(fd)
 
 
-def hot_record_write(record):
+def _hot_private_json_write(filename, value):
     safe_path(STATE, True)
-    atomic_write(STATE / 'hot-transaction.json', json.dumps(record).encode(), 0o600)
+    atomic_write(STATE / filename, json.dumps(value).encode(), 0o600)
     hot_sync()
+
+
+def hot_record_write(record):
+    _hot_private_json_write('hot-transaction.json', record)
 
 
 def hot_record_clear():
@@ -586,9 +590,7 @@ def hot_owned_read() -> dict:
 
 
 def hot_owned_write(value):
-    safe_path(STATE, True)
-    atomic_write(STATE / 'hot-owned.json', json.dumps(value).encode(), 0o600)
-    hot_sync()
+    _hot_private_json_write('hot-owned.json', value)
 
 
 def hot_cleanup(api, target, old, identity, expected, tag, scope):
