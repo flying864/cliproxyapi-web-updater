@@ -235,6 +235,32 @@ class PanelBrowser(unittest.TestCase):
                 self.assertLessEqual(footer['y'] + footer['height'], height)
                 self.page.screenshot(path=str(self.output / f'compact-long-log-{width}x{height}.png'), full_page=True)
 
+    def test_docs_link_clear_of_host_toolbar(self):
+        for width, height in [(1280, 720), (960, 540), (390, 640)]:
+            with self.subTest(width=width):
+                self.page.set_viewport_size({'width': width, 'height': height})
+                self.page.goto(ORIGIN + '/embedded')
+                # Explicit host overlay fixture approximating the user's screenshot.
+                self.page.evaluate("""() => {
+                  document.body.style.margin = '0';
+                  document.querySelector('iframe').style.cssText = 'display:block;width:100%;height:100vh;border:0';
+                  const bar = document.createElement('div'); bar.id = 'host-toolbar';
+                  bar.textContent = 'Host toolbar';
+                  bar.style.cssText = 'position:fixed;right:12px;top:8px;width:220px;height:72px;background:white;z-index:1000;border:1px solid #ccc';
+                  document.body.appendChild(bar);
+                }""")
+                frame = self.page.frames[1]
+                link = frame.locator('a.docs')
+                link.scroll_into_view_if_needed()
+                a = link.bounding_box(); b = self.page.locator('#host-toolbar').bounding_box()
+                overlap = (a['x'] < b['x'] + b['width'] and a['x'] + a['width'] > b['x'] and
+                           a['y'] < b['y'] + b['height'] and a['y'] + a['height'] > b['y'])
+                self.assertFalse(overlap, 'documentation link must not intersect host toolbar')
+                # Trial click verifies host overlay does not intercept pointer events.
+                link.click(trial=True, timeout=2000)
+                self.assertEqual(link.get_attribute('href'), 'https://github.com/flying864/cliproxyapi-web-updater#readme')
+                self.page.screenshot(path=str(self.output / f'host-toolbar-{width}.png'))
+
     def test_responsive_themes_and_safe_links(self):
         for scheme, width in [('light', 1280), ('dark', 1280), ('light', 390), ('dark', 390), ('light', 320)]:
             with self.subTest(scheme=scheme, width=width):
