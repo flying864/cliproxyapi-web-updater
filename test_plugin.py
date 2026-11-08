@@ -165,7 +165,8 @@ class Regression(unittest.TestCase):
         self.assertEqual(r['StatusCode'],200)
         body = base64.b64decode(r['Body'])
         self.assertIn(b'encodeURIComponent(v)',body)
-        self.assertNotIn(b'localStorage',body)
+        self.assertNotIn(b'.setItem(',body)
+        self.assertNotIn(b'sessionStorage',body)
 
 if __name__ == '__main__':
     if shutil.which('gcc') is None:

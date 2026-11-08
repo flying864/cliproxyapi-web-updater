@@ -101,6 +101,53 @@ class PanelBrowser(unittest.TestCase):
                 self.assertEqual(target.locator('#connection').inner_text(), '已连接')
                 self.assertEqual(self.posts, [], 'opening the panel may only read status')
 
+    @staticmethod
+    def remembered_payload(api_base=ORIGIN, remember=True):
+        # Fixture reproduces official enc::v2::, not any real user's storage.
+        value = json.dumps({'state': {'apiBase': api_base, 'managementKey': 'browser-test-only',
+                                     'rememberPassword': remember}, 'version': 0})
+        salt = b'cli-proxy-api-webui::secure-storage|cpa-panel.test'
+        encrypted = bytes(byte ^ salt[i % len(salt)] for i, byte in enumerate(value.encode()))
+        return 'enc::v2::' + base64.b64encode(encrypted).decode()
+
+    def seed_remembered_session(self, api_base=ORIGIN, remember=True, logged_in=True):
+        self.page.goto(ORIGIN + PANEL)
+        self.page.evaluate("""data => {
+          localStorage.setItem('cli-proxy-auth', data.payload);
+          if (data.logged) localStorage.setItem('isLoggedIn', 'true');
+          else localStorage.removeItem('isLoggedIn');
+        }""", {'payload': self.remembered_payload(api_base, remember), 'logged': logged_in})
+
+    def test_remembered_session_connects_and_revokes_without_typing(self):
+        self.seed_remembered_session()
+        before = self.page.evaluate('JSON.stringify({...localStorage})')
+        self.page.goto(ORIGIN + '/embedded')
+        target = self.page.frame_locator('iframe')
+        self.page.wait_for_timeout(1200)
+        self.assertEqual(target.locator('#key').input_value(), 'browser-test-only')
+        self.assertEqual(target.locator('#current').inner_text(), READY['current'])
+        self.assertEqual(self.page.evaluate('JSON.stringify({...localStorage})'), before,
+                         'plugin must not write remembered auth')
+        self.assertEqual(self.posts, [])
+        # Browser dispatches a real storage event from same-origin parent to iframe.
+        self.page.evaluate("localStorage.removeItem('isLoggedIn')")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(target.locator('#key').input_value(), '')
+        self.assertEqual(target.locator('#current').inner_text(), '—')
+        self.assertTrue(target.locator('#update').is_disabled())
+
+    def test_remembered_session_rejects_other_backend_and_standalone(self):
+        for base, remember, logged in [(ORIGIN + '/prefix', True, True),
+                                        ('http://elsewhere.test', True, True),
+                                        (ORIGIN, False, True), (ORIGIN, True, False)]:
+            self.seed_remembered_session(base, remember, logged)
+            self.page.goto(ORIGIN + '/embedded')
+            self.page.wait_for_timeout(150)
+            self.assertEqual(self.page.frame_locator('iframe').locator('#key').input_value(), '')
+        self.seed_remembered_session()
+        self.page.goto(ORIGIN + PANEL)
+        self.assertEqual(self.page.locator('#key').input_value(), '')
+
     def test_idle_poll_does_not_toggle_buttons(self):
         self.page.goto(ORIGIN + PANEL)
         self.page.locator('#key').fill('browser-test-only')
@@ -150,6 +197,43 @@ class PanelBrowser(unittest.TestCase):
                         self.assertEqual(self.posts, [])
                 finally:
                     self.page.unroute(pattern)
+
+    def test_short_viewport_controls_and_bounded_logs(self):
+        for width, height in [(960, 540), (390, 640)]:
+            with self.subTest(width=width, height=height):
+                self.page.set_viewport_size({'width': width, 'height': height})
+                # A real iframe at the host's available height, not a tall standalone page.
+                self.page.goto(ORIGIN + '/embedded')
+                self.page.evaluate("""() => {
+                    document.body.style.margin = '0';
+                    const frame = document.querySelector('iframe');
+                    frame.style.cssText = 'display:block;width:100%;height:100vh;border:0';
+                }""")
+                target = self.page.frames[1]
+                target.locator('#key').fill('browser-test-only')
+                target.wait_for_function("!document.getElementById('update').disabled")
+                selectors = ['#check', '#update', '#current', '#latest', '#connection']
+                if width == 960:
+                    selectors += ['#state', '#when', '#detail']
+                for selector in selectors:
+                    box = target.locator(selector).bounding_box()
+                    self.assertGreaterEqual(box['y'], 0, selector)
+                    self.assertLessEqual(box['y'] + box['height'], height, selector)
+                for selector in ['#check', '#update']:
+                    self.assertGreaterEqual(target.locator(selector).bounding_box()['height'], 44)
+                self.page.screenshot(path=str(self.output / f'compact-{width}x{height}.png'))
+                target.locator('#detail').evaluate("node => { node.textContent = ('Very long log entry '.repeat(20) + '\\n').repeat(300); }")
+                detail = target.locator('#detail')
+                self.assertLessEqual(detail.bounding_box()['height'], 180)
+                self.assertTrue(detail.evaluate('node => node.scrollHeight > node.clientHeight'))
+                self.assertTrue(detail.evaluate("node => ['auto', 'scroll'].includes(getComputedStyle(node).overflowY)"))
+                self.assertTrue(target.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+                self.assertEqual(target.locator('body *').evaluate_all(
+                    "nodes => nodes.filter(n => getComputedStyle(n).position === 'fixed').length"), 0)
+                target.locator('footer').scroll_into_view_if_needed()
+                footer = target.locator('footer').bounding_box()
+                self.assertLessEqual(footer['y'] + footer['height'], height)
+                self.page.screenshot(path=str(self.output / f'compact-long-log-{width}x{height}.png'), full_page=True)
 
     def test_responsive_themes_and_safe_links(self):
         for scheme, width in [('light', 1280), ('dark', 1280), ('light', 390), ('dark', 390), ('light', 320)]:

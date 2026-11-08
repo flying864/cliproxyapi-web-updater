@@ -27,7 +27,7 @@ assert.equal(nodes.state.textContent,'发现可用更新');
 assert.match(html, /:focus-visible/);
 assert.match(html, /grid-template-columns: 1fr/);
 assert.match(html, /aria-live='polite'/);
-assert.doesNotMatch(html, /localStorage|sessionStorage|innerHTML/);
+assert.doesNotMatch(html, /sessionStorage|innerHTML|setItem\s*\(/);
 assert.equal(nodes.release.href,'https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.56');
 await tick();
 assert.equal(nodes.check.disabled,false,'background GET must not disable check');

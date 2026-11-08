@@ -11,6 +11,7 @@ python3 -B scripts/check_release_version.py --tag v0.5.0
 python3 -B scripts/validate_registry.py
 python3 -B test_plugin.py
 node tests/test_panel.js
+node tests/test_panel_auth.js
 python3 -B tests/test_sanitizer.py
 python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
 ```
@@ -34,6 +35,12 @@ python -B tests/test_panel_browser.py
 源码修订 `09c3581` 修复初始化时密钥为空导致轮询停止、随后静默回填密钥仍不连接的问题。新增测试延迟设置输入框 `.value` 且不触发 input/change，在独立页面与普通 iframe 中验证无需点击即可读取状态；修复前两个场景失败，修复后通过。Node 测试还覆盖重复事件、密钥静默更换/清空、排队与已提交请求隔离、确认框边界换密钥。
 
 这不是浏览器真实密码管理器的端到端测试。受保护的密码预览可能显示圆点但不向脚本暴露值，必须由用户授权；插件不绕过此限制、不读取父页面密钥、不新增持久化。若实际宿主仍需点击，记录 iframe 请求、尺寸和控制台错误，并对照直达页面排查。
+
+### 记住密码复用与紧凑布局
+
+按用户选择“记住密码”的需求，插件仅在同源 iframe 中读取固定 `cli-proxy-auth` 和 `isLoggedIn`；使用官方管理中心 `953fb2444350c6c36052dda46cac0abce6b23ea6` 的 `enc::v2::` 编码和 Zustand version 0 格式。要求登录标记、rememberPassword、API base 与插件 origin 精确一致（仅兼容尾斜线）。不扫描其他键、不写存储、不把密钥放 URL。独立打开、跨源、旧格式或未知 schema 均回退手动输入。插件手动编辑优先，自动来源会在登出/切换记录时撤销；storage 事件使用接收窗口自己的 Storage 对象比较，避免父子 realm 对象不同导致遗漏登出。
+
+这属于指定格式兼容，不是管理中心公开会话桥；无法复用未记住密码的纯内存登录。浏览器用合成官方格式记录验证自动连接、真实跨窗口 storage 登出事件、错误后端拒绝。布局覆盖 960×540 和 390×640 的 iframe，关键操作首屏可见，长日志内部滚动，其他内容可滚动到达。
 
 ## 系统路径与权限测试
 

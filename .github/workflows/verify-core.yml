@@ -42,6 +42,7 @@ jobs:
           python3 -B test_plugin.py
           python3 -B tests/test_sanitizer.py
           node tests/test_panel.js
+          node tests/test_panel_auth.js
           python3 -B tests/test_hot_install.py
       - name: Isolated worker and installer regressions
         run: |
