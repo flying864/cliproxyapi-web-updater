@@ -24,7 +24,9 @@ class WorkflowContract(unittest.TestCase):
         core = self.text('verify-core.yml')
         self.assertIn('uses: ./.github/workflows/verify-core.yml', verify)
         for command in ['test_plugin.py', 'test_sanitizer.py', 'test_worker.py',
-                        'test_install.py', 'test_official.py', 'test_native.py', 'test_permissions.py', 'test_version.py', 'test_workflows.py']:
+                        'test_install.py', 'test_official.py', 'test_native.py', 'test_permissions.py', 'test_version.py', 'test_workflows.py',
+                        'test_panel_browser.py', 'test_panel_auth.js', 'test_hot_install_official.py',
+                        'test_runtime.py', 'test_simple_install.py', 'test_update_command.py']:
             self.assertIn(command, core)
         self.assertIn('ref: ${{ github.sha }}', core)
 

@@ -17,7 +17,7 @@ jobs:
       - name: Install test-only dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc python3 curl bubblewrap
+          sudo apt-get install -y --no-install-recommends gcc python3 python3-venv curl bubblewrap
       - name: Version, permission and native regressions
         run: |
           set -euo pipefail
@@ -39,6 +39,12 @@ jobs:
           python3 -B tests/test_hot_install.py
           python3 -B tests/test_hot_cleanup.py
           python3 -B tests/test_update_command.py
+      - name: Browser and iframe regressions (test-only environment)
+        run: |
+          python3 -m venv test-output/browser-env
+          test-output/browser-env/bin/pip install playwright==1.64.1
+          test-output/browser-env/bin/python -m playwright install --with-deps chromium
+          test-output/browser-env/bin/python -B tests/test_panel_browser.py
       - name: Isolated worker and installer regressions
         run: |
           sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_worker.py
