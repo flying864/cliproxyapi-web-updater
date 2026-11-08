@@ -652,7 +652,7 @@ def hot_cleanup(api, target, old, identity, expected, tag, scope):
                             all(isinstance(k, str) and check_metadata(v, shape[1]) for k, v in item.items()))
                 return type(item) is shape
             if not check_metadata(store, schema):
-                raise RuntimeError('未知 store 配置类型或字段（' + plugin_id + '），跳过清理')
+                raise RuntimeError('未知 store 配置类型或字段（' + plugin_id + '.store），跳过清理')
             for selector in ('version', 'release-tag'):
                 if selector not in store:
                     continue
@@ -664,9 +664,26 @@ def hot_cleanup(api, target, old, identity, expected, tag, scope):
                 if not re.fullmatch(r'[0-9][0-9A-Za-z.+-]*', version):
                     raise RuntimeError('未知版本引用（' + plugin_id + '.' + selector + '），跳过清理')
                 keep.add(str(APP / 'plugins' / (plugin_id + '-v' + version + '.so')))
-            for key in config:
-                if key not in ('enabled', 'priority', 'config', 'store'):
-                    raise RuntimeError('未知插件配置字段，跳过清理')
+            fields = {'enabled': bool, 'priority': int, 'config': None, 'store': dict}
+            if plugin_id == 'cpa-key-billing':
+                fields = dict(enabled=bool, priority=int, store=dict, state_file=str,
+                              allow_unpriced_models=bool, codex_fast_mode_billing=bool, debug=bool)
+            for key, item in config.items():
+                if key not in fields or (fields[key] is not None and type(item) is not fields[key]):
+                    raise RuntimeError('未知插件配置字段或类型（' + plugin_id + '.' + str(key) + '），跳过清理')
+            if plugin_id == 'cpa-key-billing' and 'state_file' in config:
+                raw = config['state_file']
+                if not raw or raw != raw.strip() or '\x00' in raw or '..' in raw.split('/') or str(Path(raw)) != raw:
+                    raise RuntimeError('无效路径（cpa-key-billing.state_file），跳过清理')
+                # Relative-path semantics are unverified: retain both plausible roots.
+                references = [Path(raw)] if Path(raw).is_absolute() else [APP / raw, APP / 'plugins' / raw]
+                for reference in references:
+                    for suffix in ('', '-wal', '-shm'):
+                        keep.add(str(Path(str(reference.resolve()) + suffix).resolve()))
+                        path = Path(str(reference) + suffix)
+                        keep.add(str(path))
+                        # Metadata only; never open billing state or SQLite sidecars.
+                        keep.add(str(path.resolve()))
             # Opaque plugin-specific configuration may contain path references.
             if config.get('config'):
                 raise RuntimeError('存在不透明插件配置，跳过清理')

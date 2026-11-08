@@ -82,14 +82,18 @@ plugins:
     cpa-updater:
       enabled: true
       priority: 1
-    unrelated-fixture:
+    cpa-key-billing:
       enabled: false
       priority: 37
+      allow_unpriced_models: true
+      codex_fast_mode_billing: false
+      debug: false
+      state_file: "/opt/cliproxyapi/plugins/cpa-key-billing-state-v1.db"
       store:
         author: "fixture author"
         description: "synthetic billing-store metadata, not real billing plugin"
         homepage: "https://example.invalid"
-        id: "unrelated-fixture"
+        id: "cpa-key-billing"
         install:
           type: "github-release"
         license: "MIT"
@@ -108,6 +112,12 @@ plugins:
     data = APP / 'auths/preserved.data'
     data.write_bytes(b'opaque user data must survive\x00\xff')
     os.chown(data, 1000, 1000)
+    billing_files = []
+    for suffix in ['', '-wal', '-shm']:
+        path = APP / ('plugins/cpa-key-billing-state-v1.db' + suffix)
+        path.write_bytes(b'synthetic billing data; must not be touched')
+        os.chown(path, 1000, 1000)
+        billing_files.append(path)
     # Strict service boundary: every invocation is recorded, including denied ones.
     shim = Path('/shim/systemctl')
     shim.write_text('''#!/usr/bin/python3
@@ -176,6 +186,7 @@ sys.exit(97)
                          Path('/usr/local/libexec/cliproxy-updater-worker'),
                          Path('/usr/local/libexec/cliproxy-updater-runtime.py')]
             protected.remove(config)  # Only the installer's own store.version selection may change.
+            protected.extend(billing_files)
             baseline = snapshot(protected)
             installed_yaml = before_yaml
             installed = None

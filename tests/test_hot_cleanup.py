@@ -25,7 +25,7 @@ class CleanupTests(unittest.TestCase):
                 path.chmod(0o644)
                 with self.assertRaises(RuntimeError): m.hot_owned_read()
 
-    def exercise_cleanup(self, block=None, same=False, write_fail=False, changed=False, billing=None):
+    def exercise_cleanup(self, block=None, same=False, write_fail=False, changed=False, billing=None, billing_config=None, state_case=None):
         from contextlib import ExitStack
         with tempfile.TemporaryDirectory() as root, ExitStack() as stack:
             root = Path(root); app = root / 'app'; app.mkdir(); plugins = app / 'plugins'; plugins.mkdir()
@@ -47,6 +47,22 @@ class CleanupTests(unittest.TestCase):
             billing_path.write_bytes(b'billing unchanged')
             if billing is not None:
                 config['configs']['cpa-key-billing'] = {'enabled': False, 'store': billing}
+            if billing_config is not None:
+                config['configs']['cpa-key-billing'] = billing_config.copy()
+            if state_case:
+                mode, suffix = state_case
+                reference = oldest
+                if suffix:
+                    reference = plugins / 'billing.db'
+                    Path(str(reference) + suffix).symlink_to(oldest)
+                if mode == 'absolute': raw = str(reference)
+                elif mode == 'app': raw = str(reference.relative_to(app))
+                elif mode == 'plugins': raw = reference.name
+                else:
+                    alias = app / 'billing-alias'
+                    alias.symlink_to(plugins, target_is_directory=True)
+                    raw = str(alias / reference.name)
+                config['configs']['cpa-key-billing'] = {'enabled': False, 'state_file': raw}
             config_before = json.dumps(config, sort_keys=True)
             class API:
                 def conditional(self, path): return config, 'tag'
@@ -75,6 +91,34 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(oldest.exists(), bool(block or changed or write_fail))
             if not write_fail:
                 self.assertEqual(m.hot_owned_read()['previous'], str(previous))
+
+    def test_billing_top_level_shape_allows_cleanup(self):
+        self.exercise_cleanup(billing_config={
+            'allow_unpriced_models': True, 'codex_fast_mode_billing': False,
+            'debug': False, 'enabled': True, 'priority': 10,
+            'state_file': '/var/lib/billing/state.db', 'store': {'version': '1.2.3'},
+        })
+
+    def test_billing_state_references_and_sidecar_aliases_preserve_oldest(self):
+        for mode in ('absolute', 'app', 'plugins', 'alias'):
+            for suffix in ('', '-wal', '-shm'):
+                with self.subTest(mode=mode, suffix=suffix):
+                    self.exercise_cleanup(block='state', state_case=(mode, suffix))
+
+    def test_invalid_billing_top_level_types_skip_cleanup(self):
+        cases = [('allow_unpriced_models', 1), ('codex_fast_mode_billing', 'false'),
+                 ('debug', 0), ('enabled', 1), ('priority', True), ('priority', '1'),
+                 ('state_file', None), ('store', []), ('unknown', 'secret-value'),
+                 ('state_file', '../billing.db'), ('state_file', '/tmp/../billing.db'),
+                 ('state_file', '/tmp//billing.db'), ('state_file', ''),
+                 ('state_file', ' /tmp/billing.db '),
+                 ('state_file', '/tmp/secret\x00.db')]
+        import io
+        for key, value in cases:
+            with self.subTest(key=key, value=value), patch.object(m.sys, 'stderr', new_callable=io.StringIO) as errors:
+                self.exercise_cleanup(block='invalid', billing_config={key: value})
+                self.assertIn('cpa-key-billing.' + key, errors.getvalue())
+                self.assertNotIn('secret-value', errors.getvalue())
 
     def test_complete_billing_metadata_does_not_block_updater_cleanup(self):
         self.exercise_cleanup(billing={
