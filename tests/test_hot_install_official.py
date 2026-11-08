@@ -99,7 +99,8 @@ plugins:
         source-id: "test-source"
         source-name: "test store"
         source-url: "https://example.invalid/registry.json"
-        tags: ["billing"]
+        tags:
+          - "billing"
         version: "1.2.3"
 ''')
     config.chmod(0o660)
