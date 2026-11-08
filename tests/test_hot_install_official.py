@@ -85,6 +85,22 @@ plugins:
     unrelated-fixture:
       enabled: false
       priority: 37
+      store:
+        author: "fixture author"
+        description: "synthetic billing-store metadata, not real billing plugin"
+        homepage: "https://example.invalid"
+        id: "unrelated-fixture"
+        install:
+          type: "github-release"
+        license: "MIT"
+        name: "store fixture"
+        release-tag: "v1.2.3"
+        repository: "https://example.invalid/fixture"
+        source-id: "test-source"
+        source-name: "test store"
+        source-url: "https://example.invalid/registry.json"
+        tags: ["billing"]
+        version: "1.2.3"
 ''')
     config.chmod(0o660)
     os.chown(config, 0, 1000)

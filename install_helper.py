@@ -628,12 +628,39 @@ def hot_cleanup(api, target, old, identity, expected, tag, scope):
             if not isinstance(config, dict) or not re.fullmatch(r'[A-Za-z0-9_-]+', plugin_id):
                 raise RuntimeError('未知插件配置，跳过清理')
             store = config.get('store', {})
-            if not isinstance(store, dict) or set(store) - {'version'}:
-                raise RuntimeError('未知 store 配置，跳过清理')
-            version = store.get('version')
-            if version is not None:
-                if not isinstance(version, str) or not re.fullmatch(r'[A-Za-z0-9.+_-]+', version):
-                    raise RuntimeError('未知版本引用，跳过清理')
+            # Read-only Manifest / InstallPlan shapes from official pluginstore.
+            # Metadata IDs and artifact URLs never grant deletion ownership or routing.
+            strings = {key: str for key in (
+                'id', 'name', 'description', 'author', 'version', 'release-tag',
+                'repository', 'logo', 'homepage', 'license', 'source-id', 'source-name', 'source-url')}
+            locale = dict({key: str for key in ('name', 'description', 'author', 'homepage', 'license')},
+                          tags=[str])
+            artifact = dict({key: str for key in ('goos', 'goarch', 'url', 'sha256')}, size=int)
+            schema = dict(strings, **{'schema-version': int, 'tags': [str],
+                                     'locales': ('map', locale),
+                                     'install': {'type': str, 'artifacts': [artifact]}})
+            def check_metadata(item, shape):
+                if isinstance(shape, dict):
+                    return (isinstance(item, dict) and not set(item) - set(shape) and
+                            all(check_metadata(v, shape[k]) for k, v in item.items()))
+                if isinstance(shape, list):
+                    return isinstance(item, list) and all(check_metadata(v, shape[0]) for v in item)
+                if isinstance(shape, tuple):
+                    return (isinstance(item, dict) and
+                            all(isinstance(k, str) and check_metadata(v, shape[1]) for k, v in item.items()))
+                return type(item) is shape
+            if not check_metadata(store, schema):
+                raise RuntimeError('未知 store 配置类型或字段（' + plugin_id + '），跳过清理')
+            for selector in ('version', 'release-tag'):
+                if selector not in store:
+                    continue
+                version = store[selector].strip()
+                if len(version) > 1 and version[0] in 'vV':
+                    version = version[1:]
+                if not version:
+                    continue
+                if not re.fullmatch(r'[0-9][0-9A-Za-z.+-]*', version):
+                    raise RuntimeError('未知版本引用（' + plugin_id + '.' + selector + '），跳过清理')
                 keep.add(str(APP / 'plugins' / (plugin_id + '-v' + version + '.so')))
             for key in config:
                 if key not in ('enabled', 'priority', 'config', 'store'):

@@ -25,7 +25,7 @@ class CleanupTests(unittest.TestCase):
                 path.chmod(0o644)
                 with self.assertRaises(RuntimeError): m.hot_owned_read()
 
-    def exercise_cleanup(self, block=None, same=False, write_fail=False, changed=False):
+    def exercise_cleanup(self, block=None, same=False, write_fail=False, changed=False, billing=None):
         from contextlib import ExitStack
         with tempfile.TemporaryDirectory() as root, ExitStack() as stack:
             root = Path(root); app = root / 'app'; app.mkdir(); plugins = app / 'plugins'; plugins.mkdir()
@@ -38,6 +38,16 @@ class CleanupTests(unittest.TestCase):
             config = {'enabled': True, 'dir': str(plugins), 'configs': {'cpa-updater': {'enabled': True, 'store': {'version': m.hot_name(b'current')[0]}}}}
             if block == 'reference': config['configs']['cpa-updater']['store']['version'] = m.hot_name(b'oldest')[0]
             if block == 'unknown': config['configs']['cpa-updater']['mystery'] = 'keep'
+            if block == 'opaque': config['configs']['cpa-updater']['config'] = {'path': str(oldest)}
+            if block in ('version', 'release-tag'):
+                store = config['configs']['cpa-updater']['store']
+                store['release-tag'] = ' V' + m.hot_name(b'previous')[0] + ' '
+                store[block] = ' v' + m.hot_name(b'oldest')[0] + ' '
+            billing_path = plugins / 'cpa-key-billing-v1.2.3.so'
+            billing_path.write_bytes(b'billing unchanged')
+            if billing is not None:
+                config['configs']['cpa-key-billing'] = {'enabled': False, 'store': billing}
+            config_before = json.dumps(config, sort_keys=True)
             class API:
                 def conditional(self, path): return config, 'tag'
                 def request(self, path, **kw):
@@ -59,11 +69,51 @@ class CleanupTests(unittest.TestCase):
             if write_fail: stack.enter_context(patch.object(m, 'hot_owned_write', side_effect=OSError('disk full')))
             api = API()
             m.hot_cleanup(api, current, current if same else previous, ('pid', 'start'), config, 'tag', m.hot_scope(api))
+            self.assertEqual(json.dumps(config, sort_keys=True), config_before)
+            self.assertEqual(billing_path.read_bytes(), b'billing unchanged')
             self.assertTrue(current.exists()); self.assertTrue(previous.exists()); self.assertTrue(unknown.exists())
             self.assertEqual(oldest.exists(), bool(block or changed or write_fail))
             if not write_fail:
                 self.assertEqual(m.hot_owned_read()['previous'], str(previous))
 
+    def test_complete_billing_metadata_does_not_block_updater_cleanup(self):
+        self.exercise_cleanup(billing={
+            'author': 'billing', 'description': 'billing plugin', 'homepage': 'https://example.org',
+            'id': 'cpa-updater',  # Metadata cannot redirect the config-key selector.
+            'install': {'type': 'github-release'}, 'license': 'MIT', 'name': 'Billing',
+            'release-tag': m.hot_name(b'oldest')[0], 'repository': 'owner/repo',
+            'source-id': 'official', 'source-name': 'Official', 'source-url': 'https://example.org/store',
+            'tags': ['billing'], 'version': '1.2.3',
+        })
+
+    def test_both_selectors_protect_normalized_references(self):
+        for selector in ('version', 'release-tag'):
+            with self.subTest(selector=selector): self.exercise_cleanup(block=selector)
+
+    def test_invalid_or_unknown_metadata_preserves_owned_files(self):
+        cases = [
+            {'install': []}, {'install': {'unknown': 'keep'}},
+            {'install': {'type': False}}, {'install': {'artifacts': {}}},
+            {'install': {'artifacts': [{'url': 123}]}},
+            {'install': {'artifacts': [{'size': True}]}},
+            {'install': {'artifacts': [{'path': '/do/not/delete'}]}},
+            {'tags': ['valid', 42]}, {'author': {}}, {'schema-version': True},
+            {'locales': {'en': {'unknown': 'keep'}}}, {'future-field': 'keep'},
+            {'version': None}, {'release-tag': '../unsafe'},
+        ]
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                self.exercise_cleanup(block='metadata', billing=metadata)
+
+    def test_extended_official_manifest_types_are_read_only(self):
+        self.exercise_cleanup(billing={
+            'schema-version': 2, 'logo': 'https://example.org/logo',
+            'locales': {'en': {'name': 'Billing', 'tags': ['billing']}},
+            'install': {'type': 'direct', 'artifacts': [{'goos': 'linux', 'goarch': 'amd64',
+                'url': 'https://example.org/billing.so', 'sha256': 'a' * 64, 'size': 123}]},
+        })
+
+    def test_opaque_config_still_skips_cleanup(self): self.exercise_cleanup(block='opaque')
     def test_retains_current_previous_and_unknown(self): self.exercise_cleanup()
     def test_same_target_preserves_previous(self): self.exercise_cleanup(same=True)
     def test_active_transactions_skip_all_deletion(self):
