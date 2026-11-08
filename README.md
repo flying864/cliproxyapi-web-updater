@@ -1,5 +1,7 @@
 # CPA Web Updater v0.5.0
 
+面向自用 Ubuntu/systemd 部署，从本 GitHub 仓库直接安装，不提供插件商店发布流程。
+
 给 CLIProxyAPI 管理中心增加一个 **「CPA 一键更新」** 插件：查看版本、检查更新，确认后升级主程序。
 
 **不会自动安装更新。** 网页升级主程序会短暂中断服务，请避开使用高峰；更新插件页面可使用不重启主服务的热更新。这是第三方插件，不是 CLIProxyAPI 官方安装器。
@@ -49,15 +51,15 @@
 
 看到测试 `OK`、安装提示“安装已验证完成”和服务 `active` 后，刷新管理中心，从插件栏打开。保留安装输出的备份路径。
 
-### 已经从商店安装了页面？
+### 只维护后台组件
 
-商店只安装页面插件，还需要初始化后台组件（Worker）。在**与插件配套的同版本源码目录**中执行：
+已安装插件、只需初始化或更新配套 Worker 时，在**匹配版本的源码目录**执行：
 
 ```bash
 sudo bash install.sh --worker-only
 ```
 
-此命令不替换页面、不重启主服务。更新页面请看 [更新插件](docs/UPDATING.md)，不要只运行 `--worker-only`。商店安装细节见 [商店说明](STORE_PUBLISHING.md)。
+此命令不替换页面、不重启主服务。更新页面请看 [更新插件](docs/UPDATING.md)，不要只运行 `--worker-only`。请核对后台协议和配套版本，不要将页面更新等同于 Worker 更新。
 
 ## 常见问题
 
@@ -93,14 +95,13 @@ sudo bash install.sh --worker-only
 sudo bash uninstall.sh
 ```
 
-商店安装的版本化插件文件仍由商店管理。
+卸载不批量删除版本化插件文件或备份，避免破坏恢复材料和其他插件。
 
 ## 更多说明
 
 - [更新插件](docs/UPDATING.md)：更新命令和成功检查。
 - [部署要求](docs/SECURITY.md) · [运维与恢复](docs/OPERATIONS.md)。
 - [开发与测试](docs/DEVELOPMENT.md) · [验证记录](AUDIT.md)。
-- [商店打包与发布](STORE_PUBLISHING.md) · [官方登记 PR 模板](OFFICIAL_REGISTRY_PR.md)。
 - [版本历史](CHANGELOG.md) · [第三方组件及许可](THIRD_PARTY.md)。
 
-仓库更新不会自动更新你的服务器或商店插件；请按安装或更新步骤操作。
+仓库更新不会自动更新你的服务器；请按安装或更新步骤操作。

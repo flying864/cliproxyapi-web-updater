@@ -8,12 +8,17 @@
 
 ```bash
 python3 -B scripts/check_release_version.py --tag v0.5.0
-python3 -B scripts/validate_registry.py
 python3 -B test_plugin.py
 node tests/test_panel.js
 node tests/test_panel_auth.js
 python3 -B tests/test_sanitizer.py
-python3 -B -m unittest discover -s tests -p 'test_store_*.py' -v
+python3 -B tests/test_version.py
+python3 -B tests/test_permissions.py
+python3 -B tests/test_native.py
+python3 -B tests/test_workflows.py
+python3 -B tests/test_hot_install.py
+python3 -B tests/test_hot_cleanup.py
+python3 -B tests/test_update_command.py
 ```
 
 ## 可选浏览器验收（仅开发环境）
@@ -103,8 +108,9 @@ sudo python3 -B tests/test_hot_install_official.py --binary test-output/cli-prox
 
 ## CI、版本与发布
 
-- [完整验证工作流](../.github/workflows/verify-core.yml) 供 main/PR 和 tag 复用，检出精确 commit。
-- [双架构构建](../.github/workflows/build-store.yml) 在 Ubuntu 24.04 的 amd64/arm64 原生 runner 编译，并加载最终生产库做 ABI 冒烟；不等于两个架构都完成真实服务验收。
-- README 标题也是机器检查的版本标记，保留 `# CPA Web Updater v版本号` 格式。升级用 `scripts/bump_version.py`，不要只改单处；用法和发布门禁见[发布指南](../STORE_PUBLISHING.md)。
+- [完整验证工作流](../.github/workflows/verify-core.yml) 供 main/PR 和手动运行复用，检出精确 commit。
+- [双架构构建](../.github/workflows/build-native.yml) 在 Ubuntu 24.04 的 amd64/arm64 原生 runner 编译，并加载最终生产库做 ABI 冒烟；不等于两个架构都完成真实服务验收。
+- README 标题也是机器检查的版本标记，保留 `# CPA Web Updater v版本号` 格式。升级用 `python3 -B scripts/bump_version.py 新版本号`（不带 v 的三段数字），同步 C、ABI 测试、官方宿主测试、README、Worker 和 runtime 六处标记；普通写入失败尝试还原，但不是断电原子事务。
 - Actions 结果以精确 commit 的实际运行记录为准。源码测试、CI、源码推送均不等于线上部署，不能据此声称真实 OAuth/模型/反代验收通过。
-- Push、tag、Release、官方商店 PR 和生产部署必须分别获得授权。
+- 当前只维护 GitHub 源码自安装；没有商店 ZIP、登记或自动 Release 流程。CI 构建产物不等于服务器部署；Push 和生产部署分开授权。
+- `scripts/permission_preflight.py` 仅只读检查目录权限位，不能替代安装器的路径/权限保护或 Worker 的 `--preflight`；ACL、挂载与 systemd 沙箱需另查。
