@@ -397,7 +397,7 @@ raise AssertionError('fault injection did not fire')
                     # Count only positively observed successful installs; unknown
                     # and legacy files deliberately make total file counts larger.
                     survivors = [p for p in owned_paths if p.exists()]
-                    assert survivors == owned_paths[-2:], 'owned cleanup must retain current and previous only'
+                    assert survivors == owned_paths, 'physical prune disabled: all successful installs must remain'
                     for p in survivors:
                         assert hashlib.sha256(p.read_bytes()).hexdigest() == owned_hashes[str(p)]
                     assert snapshot([Path(old_path), unknown, rollback_backup]) == preserved_libraries
@@ -434,7 +434,7 @@ raise AssertionError('fault injection did not fire')
                 preserved_libraries=[str(p) for p in (Path(old_path), unknown, rollback_backup)],
                 failure_scenarios=failure_scenarios, worker_running=False,
                 status_fixture=status, systemctl_calls=calls), indent=2))
-            print('PASS: real rollback/recovery; four distinct builds with repeat installs; current+previous owned cleanup; unknown/legacy/backups preserved; stable nonroot PID, no service mutations; config/data preserved')
+            print('PASS: real rollback/recovery; four distinct builds with repeat installs; physical prune disabled, all owned builds retained; unknown/legacy/backups preserved; stable nonroot PID, no service mutations; config/data preserved')
         finally:
             proc.terminate()
             try:

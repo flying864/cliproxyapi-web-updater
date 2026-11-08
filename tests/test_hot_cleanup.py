@@ -88,7 +88,9 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(json.dumps(config, sort_keys=True), config_before)
             self.assertEqual(billing_path.read_bytes(), b'billing unchanged')
             self.assertTrue(current.exists()); self.assertTrue(previous.exists()); self.assertTrue(unknown.exists())
-            self.assertEqual(oldest.exists(), bool(block or changed or write_fail))
+            self.assertTrue(oldest.exists())
+            if not write_fail:
+                self.assertIn(oldest.name, m.hot_owned_read()['owned'])
             if not write_fail:
                 self.assertEqual(m.hot_owned_read()['previous'], str(previous))
 
@@ -169,6 +171,32 @@ class CleanupTests(unittest.TestCase):
     def test_write_failure_warns_without_deletion(self): self.exercise_cleanup(write_fail=True)
     def test_replaced_owned_file_is_not_deleted(self): self.exercise_cleanup(changed=True)
 
+    def test_prune_final_stat_race_never_deletes_replacement(self):
+        import subprocess
+        user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
+        with tempfile.TemporaryDirectory() as root, patch.object(m, 'plugin_directory'), patch.object(m.pwd, 'getpwnam', return_value=user), patch.object(m.os, 'getgrouplist', return_value=[]):
+            target = Path(root) / m.hot_name(b'owned')[1]
+            target.write_bytes(b'owned')
+            replacement = target.with_name('billing-state'); replacement.write_bytes(b'billing-critical')
+            real_run = subprocess.run
+            hook = """import os
+original_stat=os.stat
+def race_stat(path,*args,**kwargs):
+ result=original_stat(path,*args,**kwargs)
+ if path==TARGET and kwargs.get('dir_fd') is not None:
+  os.replace(REPLACEMENT,TARGET,src_dir_fd=kwargs['dir_fd'],dst_dir_fd=kwargs['dir_fd'])
+ return result
+os.stat=race_stat
+""".replace('TARGET', repr(target.name)).replace('REPLACEMENT', repr(replacement.name))
+            def run(args, **kwargs):
+                args=list(args); args[3]=hook+args[3]
+                return real_run(args, **kwargs)
+            with patch.object(m.subprocess, 'run', side_effect=run):
+                with self.assertRaises(RuntimeError):
+                    m.plugin_io(target, 'prune', m.hashlib.sha256(b'owned').hexdigest().encode())
+            self.assertTrue(target.exists())
+            self.assertIn(b'billing-critical', [p.read_bytes() for p in Path(root).iterdir()])
+
     def test_checked_unlink_real_files_rejects_changed_and_linked_candidates(self):
         user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
         with tempfile.TemporaryDirectory() as root, patch.object(m, 'plugin_directory'), patch.object(m.pwd, 'getpwnam', return_value=user), patch.object(m.os, 'getgrouplist', return_value=[]):
@@ -180,8 +208,8 @@ class CleanupTests(unittest.TestCase):
             link = target.with_name('keep'); os.link(target, link)
             with self.assertRaises(RuntimeError): m.plugin_io(target, 'prune', digest)
             link.unlink()
-            m.plugin_io(target, 'prune', digest)
-            self.assertFalse(target.exists())
+            with self.assertRaises(RuntimeError): m.plugin_io(target, 'prune', digest)
+            self.assertEqual(target.read_bytes(), b'owned')
 
 
 if __name__ == '__main__': unittest.main()

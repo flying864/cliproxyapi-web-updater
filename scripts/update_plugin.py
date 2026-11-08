@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import stat
 import subprocess
 import sys
@@ -44,25 +43,71 @@ def create_source():
 
 
 def cleanup_source(root, record):
-    """Delete only this invocation's private allocation; refuse substituted paths."""
-    info = root.lstat()
-    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
-            or info.st_mode & 0o077 or info.st_ino != record['inode']
-            or info.st_dev != record['device'] or info.st_uid != record['uid']
-            or str(root.resolve(strict=True)) != record['path']
-            or str(root.parent.resolve(strict=True)) != record['parent']):
+    """Clean through verified directory fds, never by resolving the root again.
+
+    This prevents pathname replacement from redirecting recursive deletion. It
+    is not a security boundary against root or a hostile process with our UID
+    that can mutate the contents of the verified allocation itself.
+    """
+    if (str(root) != record['path'] or str(root.parent) != record['parent']
+            or root.name in ('', '.', '..')):
         raise RuntimeError('source directory identity changed')
-    marker = root / MARKER
-    fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:
-        mi = os.fstat(stream.fileno())
-        if (not stat.S_ISREG(mi.st_mode) or mi.st_uid != os.getuid()
-                or mi.st_mode & 0o077 or json.load(stream) != record):
-            raise RuntimeError('ownership marker changed')
-    if not shutil.rmtree.avoids_symlink_attacks:
-        raise RuntimeError('safe recursive deletion unavailable')
-    os.chdir(root.parent)
-    shutil.rmtree(root)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def same(a, b):
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+    def empty(directory_fd):
+        # Open every directory without following symlinks and check the device
+        # before descending. Do not use rmtree(root) even with a parent dir_fd:
+        # its initial stat would accept an entirely substituted root.
+        for name in os.listdir(directory_fd):
+            before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(name, flags, dir_fd=directory_fd)
+                try:
+                    child = os.fstat(child_fd)
+                    if not same(before, child) or child.st_dev != record['device']:
+                        raise RuntimeError('source child identity or device changed')
+                    empty(child_fd)
+                    if not same(child, os.stat(name, dir_fd=directory_fd, follow_symlinks=False)):
+                        raise RuntimeError('source child identity changed')
+                    os.rmdir(name, dir_fd=directory_fd)
+                finally:
+                    os.close(child_fd)
+            else:
+                # unlink never traverses a substituted symlink or directory.
+                os.unlink(name, dir_fd=directory_fd)
+
+    parent_fd = os.open(root.parent, flags)
+    try:
+        try:
+            root_fd = os.open(root.name, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise RuntimeError('source directory identity changed') from exc
+        try:
+            info = os.fstat(root_fd)
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & 0o077 or info.st_ino != record['inode']
+                    or info.st_dev != record['device'] or info.st_uid != record['uid']):
+                raise RuntimeError('source directory identity changed')
+            fd = os.open(MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=root_fd)
+            with os.fdopen(fd) as stream:
+                mi = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(mi.st_mode) or mi.st_uid != os.getuid()
+                        or mi.st_mode & 0o077 or json.load(stream) != record):
+                    raise RuntimeError('ownership marker changed')
+            empty(root_fd)
+            if not same(info, os.stat(root.name, dir_fd=parent_fd, follow_symlinks=False)):
+                raise RuntimeError('source directory identity changed')
+            # A final concurrent swap can at worst remove an empty replacement;
+            # rmdir cannot recursively delete replacement contents.
+            os.rmdir(root.name, dir_fd=parent_fd)
+        finally:
+            os.close(root_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def main(argv=None):

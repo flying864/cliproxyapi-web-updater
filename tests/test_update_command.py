@@ -106,6 +106,86 @@ class UpdateCommandTests(unittest.TestCase):
                 self.assertEqual(exc.exception.code, 2)
                 create.assert_not_called()
 
+    def test_cleanup_root_swap_after_marker_validation_preserves_foreign_data(self):
+        m = self.load()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home, mock.patch.object(m.Path, 'home', return_value=Path(home)):
+            root, record = m.create_source()
+            (root / 'source').mkdir()
+            (root / 'source' / 'owned').write_text('owned')
+            original = root.with_name(root.name + '.original')
+            load = m.json.load
+
+            def swap(stream):
+                value = load(stream)
+                root.rename(original)
+                root.mkdir(mode=0o700)
+                (root / 'foreign').write_text('must survive')
+                return value
+
+            with mock.patch.object(m.json, 'load', side_effect=swap):
+                with self.assertRaises(RuntimeError):
+                    m.cleanup_source(root, record)
+            self.assertEqual((root / 'foreign').read_text(), 'must survive')
+
+    def test_cleanup_does_not_follow_nested_symlinks(self):
+        m = self.load()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home, mock.patch.object(m.Path, 'home', return_value=Path(home)):
+            root, record = m.create_source()
+            outside = Path(home) / 'foreign'
+            outside.mkdir()
+            (outside / 'keep').write_text('foreign')
+            (root / 'source').mkdir()
+            (root / 'source' / 'link').symlink_to(outside, target_is_directory=True)
+            m.cleanup_source(root, record)
+            self.assertFalse(root.exists())
+            self.assertEqual((outside / 'keep').read_text(), 'foreign')
+
+    def test_cleanup_late_root_swap_cannot_redirect_deletion(self):
+        m = self.load()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home, mock.patch.object(m.Path, 'home', return_value=Path(home)):
+            root, record = m.create_source()
+            original = root.with_name(root.name + '.original')
+            listdir = m.os.listdir
+            swapped = False
+
+            def swap(fd):
+                nonlocal swapped
+                if isinstance(fd, int) and not swapped:
+                    swapped = True
+                    root.rename(original)
+                    root.mkdir(mode=0o700)
+                    (root / 'foreign').write_text('must survive')
+                return listdir(fd)
+
+            with mock.patch.object(m.os, 'listdir', side_effect=swap):
+                with self.assertRaises(RuntimeError):
+                    m.cleanup_source(root, record)
+            self.assertTrue(swapped)
+            self.assertEqual((root / 'foreign').read_text(), 'must survive')
+            self.assertEqual(list(original.iterdir()), [])
+
+    def test_cleanup_parent_rename_remains_bound_to_original_parent(self):
+        m = self.load()
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as scratch:
+            home = Path(scratch) / 'home'
+            home.mkdir()
+            with mock.patch.object(m.Path, 'home', return_value=home):
+                root, record = m.create_source()
+            moved = home.with_name('moved')
+            load = m.json.load
+
+            def swap(stream):
+                value = load(stream)
+                home.rename(moved)
+                (home / root.name).mkdir(parents=True)
+                (home / root.name / 'foreign').write_text('must survive')
+                return value
+
+            with mock.patch.object(m.json, 'load', side_effect=swap):
+                m.cleanup_source(root, record)
+            self.assertFalse((moved / root.name).exists())
+            self.assertEqual((root / 'foreign').read_text(), 'must survive')
+
     def test_cleanup_refuses_tampered_marker_and_symlink(self):
         m = self.load()
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as home, mock.patch.object(m.Path, 'home', return_value=Path(home)):

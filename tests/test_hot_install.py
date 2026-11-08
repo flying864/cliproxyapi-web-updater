@@ -44,7 +44,7 @@ class HotInstallTests(unittest.TestCase):
                 patch.object(m.os, 'getgrouplist', return_value=[]):
             target = Path(directory) / m.hot_name(b'new')[1]
             target.write_bytes(b'new')
-            payload = json.dumps([target.name + '.' + 'a' * 24 + '.rollback-backup', m.hashlib.sha256(b'new').hexdigest()]).encode()
+            payload = json.dumps([target.name + '.' + 'a' * 24 + '.rollback-backup', m.hashlib.sha256(b'new').hexdigest(), [target.stat().st_dev, target.stat().st_ino]]).encode()
             m.plugin_io(target, 'quarantine', payload)
             backup = target.with_name(target.name + '.' + 'a' * 24 + '.rollback-backup')
             self.assertFalse(target.exists())
@@ -57,6 +57,80 @@ class HotInstallTests(unittest.TestCase):
             target.symlink_to(backup)
             with self.assertRaises(RuntimeError): m.plugin_io(target, 'quarantine', payload)
             self.assertEqual(backup.read_bytes(), b'new')
+
+    def test_quarantine_source_swap_preserves_bytes_and_reports_failure(self):
+        import subprocess
+        from types import SimpleNamespace
+        user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
+        for swapped in (b'billing-critical', b'new'):
+            with self.subTest(swapped=swapped), tempfile.TemporaryDirectory() as directory, patch.object(m, 'plugin_directory'), patch.object(m.pwd, 'getpwnam', return_value=user), patch.object(m.os, 'getgrouplist', return_value=[]):
+                target = Path(directory) / m.hot_name(b'new')[1]; target.write_bytes(b'new')
+                replacement = target.with_name('replacement'); replacement.write_bytes(swapped)
+                backup = target.with_name(target.name + '.' + 'b' * 24 + '.rollback-backup')
+                payload = json.dumps([backup.name, m.hashlib.sha256(b'new').hexdigest(), [target.stat().st_dev, target.stat().st_ino]]).encode()
+                real_run = subprocess.run
+                hook = """import os
+original_stat=os.stat
+def race_stat(path,*args,**kwargs):
+ result=original_stat(path,*args,**kwargs)
+ if path==TARGET and kwargs.get('dir_fd') is not None:
+  os.replace('replacement',TARGET,src_dir_fd=kwargs['dir_fd'],dst_dir_fd=kwargs['dir_fd'])
+ return result
+os.stat=race_stat
+""".replace('TARGET', repr(target.name))
+                def run(args, **kwargs):
+                    args=list(args); args[3]=hook+args[3]
+                    return real_run(args, **kwargs)
+                with patch.object(m.subprocess, 'run', side_effect=run):
+                    with self.assertRaises(RuntimeError): m.plugin_io(target, 'quarantine', payload)
+                self.assertEqual(backup.read_bytes(), swapped)
+                self.assertFalse(backup.name.endswith('.so'))
+                self.assertFalse(target.exists())
+                # Even identical bytes must never legitimize the wrong moved inode.
+                for _ in range(2):
+                    with self.assertRaises(RuntimeError): m.plugin_io(target, 'quarantine', payload)
+                self.assertEqual(backup.read_bytes(), swapped)
+
+    def test_recovery_retries_never_adopt_same_digest_wrong_inode(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        user = SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid())
+        for scenario in ('wrong-backup', 'legacy-backup', 'missing'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                app = Path(directory); plugins = app / 'plugins'; plugins.mkdir()
+                state = app / 'state'; state.mkdir()
+                old = plugins / 'cpa-updater.so'; old.write_bytes(b'old')
+                target = plugins / m.hot_name(b'new')[1]; target.write_bytes(b'new')
+                expected = [target.stat().st_dev, target.stat().st_ino]
+                backup = target.with_name(target.name + '.' + 'c' * 24 + '.rollback-backup')
+                backup.write_bytes(b'new')
+                target.unlink()
+                if scenario == 'missing': backup.unlink()
+                before = {'configs': {'cpa-updater': {'store': {}}}}
+                record = dict(identity=['10', '20'], path=str(old), before=before,
+                    expected=before, tag='original', scope='scope', created=True,
+                    candidate=str(target), quarantine=backup.name,
+                    digest=m.hashlib.sha256(b'new').hexdigest())
+                if scenario != 'legacy-backup': record['quarantine_identity'] = expected
+                for key, value in [('APP', app), ('STATE', state)]:
+                    stack.enter_context(patch.object(m, key, value))
+                for name in ('safe_path', 'plugin_directory'):
+                    stack.enter_context(patch.object(m, name))
+                stack.enter_context(patch.object(m.pwd, 'getpwnam', return_value=user))
+                stack.enter_context(patch.object(m.os, 'getgrouplist', return_value=[]))
+                stack.enter_context(patch.object(m, 'hot_identity', return_value=('10', '20')))
+                stack.enter_context(patch.object(m, 'hot_panel', return_value=b'old'))
+                verified = stack.enter_context(patch.object(m, 'hot_verify'))
+                api = Mock(); api.conditional.return_value = (before, 'original')
+                m.hot_record_write(record)
+                original_record = (state / 'hot-transaction.json').read_bytes()
+                for _ in range(2):
+                    retry = json.loads((state / 'hot-transaction.json').read_bytes())
+                    with self.assertRaisesRegex(RuntimeError, 'hot 恢复未完成'):
+                        m.hot_recover(api, retry)
+                    self.assertEqual((state / 'hot-transaction.json').read_bytes(), original_record)
+                verified.assert_not_called()
+                if scenario != 'missing': self.assertEqual(backup.read_bytes(), b'new')
 
     def test_pending_is_compatible_deferred_work(self):
         m.hot_status({'protocol': 1, 'state': 'idle', 'pending': True})
@@ -110,8 +184,13 @@ class HotInstallTests(unittest.TestCase):
             stack.enter_context(patch.object(m, 'command', side_effect=compile))
             def io(path, action, data=None):
                 if action == 'read': return path.read_bytes() if path.exists() else None
+                if action == 'inspect':
+                    return json.dumps([dict(identity=[p.stat().st_dev, p.stat().st_ino],
+                        digest=m.hashlib.sha256(p.read_bytes()).hexdigest()) if p.exists() else None
+                        for p in [path.with_name(name) for name in json.loads(data)]]).encode()
                 if action == 'quarantine':
-                    destination, digest = json.loads(data)
+                    destination, digest, expected_identity = json.loads(data)
+                    self.assertEqual(json.loads((state / 'hot-transaction.json').read_text())['quarantine_identity'], expected_identity)
                     backup = path.with_name(destination)
                     if path.exists():
                         self.assertEqual(m.hashlib.sha256(path.read_bytes()).hexdigest(), digest)

@@ -129,8 +129,21 @@ try:
   finally:
    try:os.unlink(name,dir_fd=fd)
    except FileNotFoundError:pass
+ elif action=='inspect':
+  names=json.loads(sys.stdin.buffer.read(4096))
+  result=[]
+  for name in names:
+   if not isinstance(name,str) or name in ('','.','..') or '/' in name: raise ValueError('unsafe name')
+   try:f=os.open(name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+   except FileNotFoundError:result.append(None);continue
+   with os.fdopen(f,'rb') as stream:
+    st=os.fstat(stream.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe candidate')
+    result.append(dict(identity=[st.st_dev,st.st_ino],digest=hashlib.sha256(stream.read(20000001)).hexdigest()))
+  sys.stdout.write(json.dumps(result))
  elif action=='quarantine':
-  destination,digest=json.loads(sys.stdin.buffer.read(4096))
+  destination,digest,expected=json.loads(sys.stdin.buffer.read(4096))
+  if not isinstance(expected,list) or len(expected)!=2 or any(type(x)!=int or x<0 for x in expected): raise ValueError('missing quarantine identity')
   if not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so',p.name): raise ValueError('unsafe candidate')
   if not re.fullmatch(re.escape(p.name)+r'\.[0-9a-f]{24}\.rollback-backup',destination) or not re.fullmatch(r'[0-9a-f]{64}',digest): raise ValueError('unsafe backup')
   def checked(name):
@@ -140,8 +153,10 @@ try:
     st=os.fstat(stream.fileno())
     if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe candidate')
     if hashlib.sha256(stream.read(20000001)).hexdigest()!=digest: raise ValueError('changed candidate')
+    if [st.st_dev,st.st_ino]!=expected: raise ValueError('quarantine identity changed; recovery incomplete')
     return st
   source=checked(p.name); backup=checked(destination)
+  if source is None and backup is None: raise ValueError('quarantine object missing; recovery incomplete')
   if source is not None:
    if backup is not None: raise ValueError('backup already exists')
    now=os.stat(p.name,dir_fd=fd,follow_symlinks=False)
@@ -152,18 +167,13 @@ try:
    if libc.renameat2(fd,os.fsencode(p.name),fd,os.fsencode(destination),1)!=0:
     error=ctypes.get_errno();raise OSError(error,os.strerror(error))
    os.fsync(fd)
+   # Detection, not atomic custody: never delete or rename back a wrong object.
+   # Same-UID adversaries can still mutate names/bytes; fail closed on detection.
+   moved=checked(destination)
+   if moved is None or (moved.st_dev,moved.st_ino)!=(source.st_dev,source.st_ino):
+    raise ValueError('quarantine source replaced; backup retained; recovery incomplete')
  elif action=='prune':
-  digest=sys.stdin.buffer.read(65).decode()
-  if not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so',p.name) or not re.fullmatch(r'[0-9a-f]{64}',digest): raise ValueError('unsafe owned candidate')
-  try:f=os.open(p.name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
-  except FileNotFoundError:sys.exit(0)
-  with os.fdopen(f,'rb') as stream:
-   st=os.fstat(stream.fileno())
-   if not stat.S_ISREG(st.st_mode) or st.st_nlink!=1 or st.st_size>20000000: raise ValueError('unsafe owned candidate')
-   if hashlib.sha256(stream.read(20000001)).hexdigest()!=digest: raise ValueError('changed owned candidate')
-   now=os.stat(p.name,dir_fd=fd,follow_symlinks=False)
-   if (now.st_dev,now.st_ino,now.st_nlink)!=(st.st_dev,st.st_ino,1): raise ValueError('replaced owned candidate')
-   os.unlink(p.name,dir_fd=fd);os.fsync(fd)
+  raise ValueError('automatic physical prune disabled: service-writable name race')
  elif action=='delete':
   try:os.unlink(p.name,dir_fd=fd);os.fsync(fd)
   except FileNotFoundError:pass
@@ -545,7 +555,26 @@ def hot_recover(api, record):
             if (target.parent != old.parent or target == old or
                     not re.fullmatch(r'cpa-updater-v0\.0\.1(?:\.\d+){8}\.so', target.name)):
                 raise RuntimeError('恢复候选路径不安全')
-            plugin_io(target, 'quarantine', json.dumps([record['quarantine'], record['digest']]).encode())
+            expected_identity = record.get('quarantine_identity')
+            if expected_identity is None:
+                inspected = plugin_io(target, 'inspect', json.dumps(
+                    [target.name, record['quarantine']]).encode())
+                if inspected is None:
+                    raise RuntimeError('隔离身份检查未返回结果')
+                source, backup = json.loads(inspected)
+                # Never bootstrap trust from a pre-existing backup, even if its
+                # bytes match. Only the private root transaction is evidence.
+                if backup is not None:
+                    raise RuntimeError('隔离备份缺少可信身份，需人工恢复')
+                if source is not None:
+                    if source['digest'] != record['digest']:
+                        raise RuntimeError('隔离候选摘要变化')
+                    expected_identity = source['identity']
+                    record['quarantine_identity'] = expected_identity
+                    hot_record_write(record)  # durable BEFORE any rename
+            if expected_identity is not None:
+                plugin_io(target, 'quarantine', json.dumps(
+                    [record['quarantine'], record['digest'], expected_identity]).encode())
         if current == record['expected'] or (legacy and candidate and record.get('created')):
             if hot_identity() != identity:
                 raise RuntimeError('主服务身份变化，拒绝恢复写入')
@@ -687,17 +716,9 @@ def hot_cleanup(api, target, old, identity, expected, tag, scope):
             # Opaque plugin-specific configuration may contain path references.
             if config.get('config'):
                 raise RuntimeError('存在不透明插件配置，跳过清理')
-        for name, digest in list(value['owned'].items()):
-            path = APP / 'plugins' / name
-            if str(path) in keep:
-                continue
-            fence()
-            # Forget durably first: crashes/write failures can leak, never expand ownership.
-            reduced = copy.deepcopy(value)
-            del reduced['owned'][name]
-            hot_owned_write(reduced)
-            value = reduced
-            plugin_io(path, 'prune', digest.encode())
+        # A pathname stat/hash followed by unlink cannot bind deletion to an inode
+        # in a service-writable directory. Retain all ownership records and files.
+        print('警告：自动物理 prune 已停用（路径替换竞态）；保留所有旧插件及 current/previous 归属记录', file=sys.stderr)
     except Exception as exc:
         print('警告：hot 插件清理跳过/未完成：' + str(exc), file=sys.stderr)
 
