@@ -11,7 +11,7 @@
 ```bash
 python3 -c '
 import hashlib, sys, urllib.request
-commit = "5b3041b21c76588577744074c530397cf7daf3ea"
+commit = "54d70b5ebee27c23990254326cd14b89e1195928"
 url = "https://raw.githubusercontent.com/flying864/cliproxyapi-web-updater/" + commit + "/scripts/update_plugin.py"
 with urllib.request.urlopen(url, timeout=30) as response:
     code = response.read(65537)
