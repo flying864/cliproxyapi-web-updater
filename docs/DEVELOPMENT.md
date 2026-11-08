@@ -102,11 +102,17 @@ sudo python3 -B tests/test_hot_install_official.py --binary test-output/cli-prox
 
 ## 成功后清理验收
 
+以下是历史顺序执行测试，不覆盖最后一次文件身份检查与删除之间的并发替换窗口。安全复核复现该窗口后，当前修复暂停物理 prune，保留旧插件；不将旧测试通过解读为并发安全保证。
+
 代码 `9ef47bc` 的 [GitHub 连续热更新验收](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42445721330) 与 [完整 CI](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/42445723915) 通过。真实官方非 root 宿主依次安装四个构建并各重复一次：已登记的当前/上一版保留，legacy、未知同命名文件和隔离备份未删除；PID/start、配置、数据与队列保持不变。
 
 `tests/test_hot_cleanup.py` 检查私有归属、文件摘要/链接、引用与活动事务保护及警告语义。`tests/test_update_command.py` 使用模拟下载/安装命令，但实际创建和删除临时目录，验证成功清理、失败保留、只恢复旧事务、健康失败、源码身份/标记篡改及清理失败返回成功。更新脚本不扫描旧目录；生产环境尚未通过此脚本操作。
 
-清理发生在热安装成功验证并清除事务之后，仍持有公共锁；`hot-owned.json` root/0600 记录归属及 current/previous。仅服务身份执行单文件摘要复核与删除。未知配置保守跳过；先放弃旧文件归属再删除，失败最多留下文件，不会扩大未来删除权限。清理不涉及配置/OAuth、完整安装备份或主程序升级备份，也不卸载主进程内已驻留的动态库。
+隔离操作的预期 device/inode 在 rename 之前持久保存到 root 私有事务；重试仍使用同一身份。备份存在但无可信身份时停止人工处理，不能仅凭相同摘要采纳。移动后检测只能发现已发生的错误移动并保留证据，不是抵御同 UID 并发写入者的原子隔离。
+
+源码清理通过已验证目录 fd 递归，不再对根路径调用 rmtree；根/父目录替换用例验证外来目录内容保留。同 UID 或 root 向已验证目录内部注入内容不属于此隔离保证，最终 rmdir 只可能移除空目录。
+
+热安装成功后仍持有公共锁并维护 `hot-owned.json` 的 current/previous 信息，但旧插件物理删除已暂停。共同锁不能约束其他持有目录写权限的进程，摘要和 inode 检查之后的名称删除不是原子条件删除。安全优先保留文件；配置/OAuth、完整安装备份和主程序备份不动，也不卸载驻留库映像。
 
 ## CI、版本与发布
 

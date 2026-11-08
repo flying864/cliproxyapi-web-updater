@@ -11,11 +11,11 @@
 ```bash
 python3 -c '
 import hashlib, sys, urllib.request
-commit = "af7267ad21c428d067f14213e5e6afa06720460a"
+commit = "c87889e8c837b81a21c62b399a99f23f61c11621"
 url = "https://raw.githubusercontent.com/flying864/cliproxyapi-web-updater/" + commit + "/scripts/update_plugin.py"
 with urllib.request.urlopen(url, timeout=30) as response:
     code = response.read(65537)
-if hashlib.sha256(code).hexdigest() != "3d6c7f29e5f1e6a78c1003637404acc8a5ee6e2c3edce0afd95dfe913b9e2e93":
+if hashlib.sha256(code).hexdigest() != "d75f2f04cefb96d8ef72b23312eacb8b44fc970a7c5f3d9d7b94beb1f383bd9e":
     sys.exit("更新脚本校验失败，已停止")
 sys.argv = ["update_plugin.py", "--commit", commit]
 exec(compile(code, url, "exec"), {"__name__": "__main__"})
@@ -34,7 +34,7 @@ exec(compile(code, url, "exec"), {"__name__": "__main__"})
 ## 成功后的自动清理
 
 - 只删除本次命令创建的源码目录；旧的 `/root/cliproxy-updater-update.*` 目录不会被批量删除。
-- 对已登记归属的插件，保留当前版本和上一可回退版本，只清理未被配置、实际加载或恢复事务引用的更旧文件。
+- 为规避共享插件目录中的文件替换竞态，**暂停自动删除旧插件文件**。仍记录当前/上一版本，旧文件保留，不影响热更新。
 - 历史来源不明的插件、商店文件、恢复备份、配置和 OAuth 数据不删。因此目录里可能仍超过两个文件。
 - 清理失败只显示警告，不影响已经验证成功的更新；失败、中断或仅恢复旧事务时保留源码。
 
