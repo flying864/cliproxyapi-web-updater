@@ -17,6 +17,17 @@ def synthetic_elf(arch):
 
 
 class TestNativeELF(unittest.TestCase):
+    def test_reject_wrong_type_encoding_and_machine(self):
+        for label, offset, value in [('ELF32', 4, 1), ('big-endian', 5, 2),
+                                     ('ET_EXEC', 16, 2), ('unknown machine', 18, 1)]:
+            with self.subTest(label=label):
+                data = bytearray(synthetic_elf('amd64'))
+                data[offset] = value
+                with self.assertRaises(ValueError):
+                    elf_arch(data)
+        with self.assertRaises(ValueError):
+            elf_arch(synthetic_elf('amd64')[:63])
+
     def test_elf_arch(self):
         self.assertEqual(elf_arch(synthetic_elf('amd64')), 'amd64')
         self.assertEqual(elf_arch(synthetic_elf('arm64')), 'arm64')

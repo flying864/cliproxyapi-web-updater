@@ -15,5 +15,3 @@ def elf_arch(binary):
         if machine == expect:
             return arch
     raise ValueError('Unsupported ELF e_machine: ' + str(machine))
-
-
