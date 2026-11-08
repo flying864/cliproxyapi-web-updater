@@ -1,11 +1,6 @@
-name: Native store build
+name: Native ABI build
 on:
   workflow_call:
-    inputs:
-      release-tag:
-        type: string
-        required: false
-        default: ''
 permissions:
   contents: read
 jobs:
@@ -27,15 +22,10 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Version and registry
-        env:
-          RELEASE_TAG: ${{ inputs.release-tag }}
+      - name: Version and ABI
         run: |
           set -euo pipefail
-          args=()
-          if [[ -n "$RELEASE_TAG" ]]; then args=(--tag "$RELEASE_TAG"); fi
-          python3 -B scripts/check_release_version.py "${args[@]}"
-          python3 -B scripts/validate_registry.py
+          python3 -B scripts/check_release_version.py
           python3 -B test_plugin.py
       - name: Build and exercise final production library
         env:
@@ -47,11 +37,10 @@ jobs:
           VERSION=$(python3 -B -c 'import sys; sys.path.insert(0,"scripts"); from check_release_version import source_versions; print(next(iter(source_versions().values())))')
           readelf --version-info build/cpa-updater.so
           python3 -B scripts/smoke_plugin.py --binary build/cpa-updater.so --version "$VERSION" --arch "$RELEASE_ARCH"
-          python3 -B scripts/store_artifacts.py pack --binary build/cpa-updater.so --version "$VERSION" --arch "$RELEASE_ARCH" --output release-assets
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: cpa-updater-linux-${{ matrix.arch }}
-          path: release-assets/*.zip
+          path: build/cpa-updater.so
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

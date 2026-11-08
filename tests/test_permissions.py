@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import importlib
-preflight = importlib.import_module("market_preflight")
+preflight = importlib.import_module("permission_preflight")
 
 
 class TestPreflight(unittest.TestCase):

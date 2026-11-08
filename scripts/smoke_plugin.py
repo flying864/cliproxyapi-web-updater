@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-from store_artifacts import elf_arch
+from native_artifacts import elf_arch
 
 REPOSITORY = 'https://github.com/flying864/cliproxyapi-web-updater'
 

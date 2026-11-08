@@ -13,4 +13,4 @@ jobs:
   verify:
     uses: ./.github/workflows/verify-core.yml
   build:
-    uses: ./.github/workflows/build-store.yml
+    uses: ./.github/workflows/build-native.yml

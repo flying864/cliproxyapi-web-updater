@@ -1,4 +1,4 @@
-"""Release-gate contract tests; stdlib only, no workflow execution or publication."""
+"""Core CI contract tests; stdlib only, no workflow execution or publication."""
 from pathlib import Path
 import re
 import subprocess
@@ -13,18 +13,18 @@ class WorkflowContract(unittest.TestCase):
     def text(self, name):
         return (ROOT / '.github/workflows' / name).read_text()
 
-    def test_publish_depends_on_same_commit_full_verification(self):
-        release = self.text('release-plugin.yml')
-        self.assertIn('uses: ./.github/workflows/verify-core.yml', release)
-        self.assertRegex(release, r'publish:\s*\n\s*needs: \[verify, build\]')
-        self.assertIn('release-tag: ${{ github.ref_name }}', release)
+    def test_store_publication_is_removed(self):
+        self.assertFalse((ROOT / '.github/workflows/release-plugin.yml').exists())
+        for file in (ROOT / '.github/workflows').glob('*.yml'):
+            self.assertNotIn('contents: write', file.read_text())
+            self.assertNotIn('gh release create', file.read_text())
 
-    def test_main_and_release_reuse_exact_same_test_job(self):
+    def test_main_reuses_full_core_verification(self):
         verify = self.text('verify.yml')
         core = self.text('verify-core.yml')
         self.assertIn('uses: ./.github/workflows/verify-core.yml', verify)
         for command in ['test_plugin.py', 'test_sanitizer.py', 'test_worker.py',
-                        'test_install.py', 'test_official.py', 'test_store_*.py']:
+                        'test_install.py', 'test_official.py', 'test_native.py', 'test_permissions.py', 'test_version.py', 'test_workflows.py']:
             self.assertIn(command, core)
         self.assertIn('ref: ${{ github.sha }}', core)
 
@@ -39,13 +39,14 @@ class WorkflowContract(unittest.TestCase):
             with self.subTest(script=script):
                 self.assertTrue((ROOT / script).is_file(), script)
 
-    def test_both_native_builds_are_checked_before_release(self):
-        build = self.text('build-store.yml')
+    def test_both_native_builds_are_checked(self):
+        build = self.text('build-native.yml')
         for text in ['ubuntu-24.04', 'ubuntu-24.04-arm', 'scripts/smoke_plugin.py',
                      'build/cpa-updater.so', 'readelf --version-info', 'timeout-minutes:']:
             self.assertIn(text, build)
-        self.assertIn('uses: ./.github/workflows/build-store.yml', self.text('verify.yml'))
-        self.assertIn('uses: ./.github/workflows/build-store.yml', self.text('release-plugin.yml'))
+        self.assertIn('uses: ./.github/workflows/build-native.yml', self.text('verify.yml'))
+        self.assertIn('path: build/cpa-updater.so', build)
+        self.assertNotIn('store_artifacts', build)
 
     def test_production_smoke_rejects_wrong_metadata_version(self):
         import platform
@@ -62,18 +63,14 @@ class WorkflowContract(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('AssertionError', result.stderr)
 
-    def test_actions_are_immutable_and_release_is_tag_only(self):
+    def test_actions_are_immutable_and_jobs_are_bounded(self):
         for file in (ROOT / '.github/workflows').glob('*.yml'):
             text = file.read_text()
             for uses in re.findall(r'uses:\s*([^\s#]+)', text):
                 if not uses.startswith('./'):
                     self.assertRegex(uses, r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$')
-        release = self.text('release-plugin.yml')
-        self.assertNotIn('workflow_dispatch:', release)
-        self.assertIn('tags:', release)
-        self.assertIn('gh release download', release)
-        self.assertIn('contents: write', release)
-        self.assertIn('--verify-tag', release)
+        for name in ('verify-core.yml', 'build-native.yml'):
+            self.assertIn('timeout-minutes:', self.text(name))
 
 
 if __name__ == '__main__':
