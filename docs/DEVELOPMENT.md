@@ -16,12 +16,13 @@ python3 -B tests/test_version.py
 python3 -B tests/test_permissions.py
 python3 -B tests/test_native.py
 python3 -B tests/test_workflows.py
+python3 -B tests/test_private_json.py
 python3 -B tests/test_hot_install.py
 python3 -B tests/test_hot_cleanup.py
 python3 -B tests/test_update_command.py
 ```
 
-## 可选浏览器验收（仅开发环境）
+## 浏览器验收（仅开发环境）
 
 `tests/test_panel_browser.py` 用 gcc 编译当前插件，再从真实 ABI 响应中读取 HTML，以 Chromium 验证无点击首屏、普通 iframe 嵌入、轮询按钮稳定、浅色/深色及 320/390/1280px 布局。状态接口全部使用明确的测试夹具，不连接真实管理服务，也不执行升级；普通 iframe 测试不等于已验证用户部署的管理中心。
 
@@ -31,7 +32,7 @@ python3 -B tests/test_update_command.py
 python -B tests/test_panel_browser.py
 ```
 
-截图保存在忽略目录 `test-output/panel-browser/`。Playwright、Chromium 都不是生产依赖；此可选测试尚未加入完整 CI。Node 标准库测试仍是默认前端回归入口，覆盖轮询中点击排队、重复操作抑制、确认版本绑定、密钥切换隔离及不重放 POST。
+截图保存在忽略目录 `test-output/panel-browser/`。Playwright、Chromium 都不是生产依赖；完整 CI 使用独立虚拟环境运行此测试，Playwright 固定为 1.64.1。Node 标准库测试仍是默认前端回归入口，覆盖轮询中点击排队、重复操作抑制、确认版本绑定、密钥切换隔离及不重放 POST。
 
 视觉参考：[Key Policy 插件](https://github.com/origin652/cpa-plugin-key-policy/tree/c041a48bb5e3c3ab44b24d05fa2a27c77c55caf5/web/src) 的 Quiet Paper 卡片与官方管理中心的暖灰配色。未引入其框架、认证复用或持久化存储；当前主题仍跟随系统明暗设置。
 
@@ -87,6 +88,7 @@ sudo python3 -B tests/test_official.py --binary test-output/cli-proxy-api --outp
 `tests/test_hot_install_official.py` 在真实 UID/GID 1000 官方进程上执行原始 `install.sh --hot-reload`：旧页面换新、重复安装、配置与文件权限保留、无 systemctl 写操作。故障注入在真实 PUT 已保存且新页面生效后制造响应丢失/进程退出，再验证旧页面、配置、进程身份和持久事务恢复。systemctl 只读查询为测试替身，Worker 使用 protocol-1 idle fixture，不宣称真实 systemd 或真实用户模型验收。
 
 ```bash
+python3 -B tests/test_private_json.py
 python3 -B tests/test_hot_install.py
 sudo python3 -B tests/test_hot_reload.py --binary test-output/cli-proxy-api --binary-sha256 0aa3798effa9a387feba232ef5306d159b0b7312a4a70abd794a7ba6e1e5c079 --output test-output/hot-reload
 sudo python3 -B tests/test_hot_install_official.py --binary test-output/cli-proxy-api --output test-output/hot-install
