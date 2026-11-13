@@ -30,6 +30,12 @@ class WorkflowContract(unittest.TestCase):
             self.assertIn(command, core)
         self.assertIn('ref: ${{ github.sha }}', core)
 
+    def test_backup_manager_receives_private_ci_tmpdir(self):
+        core=self.text('verify-core.yml')
+        setup='export TMPDIR="$(mktemp -d "$RUNNER_TEMP/cpa-backup-tests.XXXXXXXX")"'
+        self.assertIn(setup,core)
+        self.assertLess(core.index(setup),core.index('python3 -B tests/test_backup_manager.py'))
+
     def test_shell_syntax_checks_reference_existing_scripts(self):
         core = self.text('verify-core.yml')
         match = re.search(r'for script in ([^;\n]+); do\s+bash -n "\$script"', core)

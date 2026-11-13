@@ -37,6 +37,7 @@ jobs:
           node tests/test_panel.js
           node tests/test_panel_auth.js
           node tests/test_panel_backups.js
+          export TMPDIR="$(mktemp -d "$RUNNER_TEMP/cpa-backup-tests.XXXXXXXX")"
           python3 -B tests/test_backup_manager.py
           python3 -B tests/test_backup_install.py
           python3 -B tests/test_private_json.py
