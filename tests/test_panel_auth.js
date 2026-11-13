@@ -10,7 +10,7 @@ function fixture(state={},version=0){
  return 'enc::v2::'+Buffer.from(data.map((b,i)=>b^salt[i%salt.length])).toString('base64');
 }
 function boot({raw=fixture(),logged='true',top=false,cross=false,denied=false}={}){
- const nodes={};for(const id of ['key','check','update','current','latest','state','when','detail','connection','release'])nodes[id]={value:'',textContent:'',disabled:false,removeAttribute(k){delete this[k]}};
+ const nodes={};for(const id of ['key','check','update','current','latest','state','when','detail','connection','release','backup-scan','backup-delete','backup-state','backup-total','backup-list','backup-prev','backup-next','backup-page'])nodes[id]={value:'',textContent:'',disabled:false,replaceChildren(){},removeAttribute(k){delete this[k]}};
  const reads=[],calls=[],events={},timers=[];let storage={getItem(k){reads.push(k);if(denied)throw Error('denied');assert.ok(['cli-proxy-auth','isLoggedIn'].includes(k));return k==='cli-proxy-auth'?raw:logged}};
  const window={localStorage:storage,location:new URL(origin+'/plugin'),addEventListener:(k,f)=>events[k]=f};
  window.parent=top?window:{document:{},location:new URL(origin+'/management.html'),localStorage:storage};

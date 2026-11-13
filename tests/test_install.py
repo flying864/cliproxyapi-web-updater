@@ -116,7 +116,11 @@ class InstallTests(unittest.TestCase):
 
     def test_units_recovery_not_recursive(self):
         data = load().units()
-        self.assertIn('OnFailure=cliproxy-updater-recover.service', data['cliproxy-updater.service'])
+        self.assertIn('OnFailure=cliproxy-updater-failure.service', data['cliproxy-updater.service'])
+        failure = data['cliproxy-updater-failure.service']
+        self.assertIn('--recover-update-failure', failure)
+        self.assertNotIn('OnFailure=', failure)
+        self.assertNotIn('WantedBy=', failure)
         recover = data['cliproxy-updater-recover.service']
         self.assertIn('--recover', recover)
         self.assertIn('WantedBy=multi-user.target', recover)

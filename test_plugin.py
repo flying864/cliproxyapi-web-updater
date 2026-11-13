@@ -71,6 +71,62 @@ class Regression(unittest.TestCase):
         p.write_text(raw or '{"protocol":1,"worker_version":"0.5.0","state":"ready","latest":"v8.0.56"}')
         p.chmod(0o644)
 
+    def test_backups_protocol(self):
+        self.ready()
+        self.assertEqual(self.http('backups', 'POST')[0], 503)
+        self.ready('{"protocol":1,"backups_protocol":1,"state":"ready"}')
+        self.assertEqual(self.http('backups', 'POST')[0], 202)
+        self.assertIs(json.loads(self.http('backups')[1])['pending'], True)
+        self.assertEqual((self.sandbox / 'inbox/request').read_text(), 'backups')
+        (self.sandbox / 'inbox/request').unlink()
+        token, ident = 'a' * 32, 'b' * 32
+        for q in ({}, {'preview':[token], 'ids':[ident+','+ident]}, {'preview':[token,token], 'ids':[ident]}, {'preview':[token], 'ids':['../x']}):
+            self.assertEqual(self.http('cleanup', 'POST', q)[0], 400)
+        self.assertEqual(self.http('cleanup', 'POST', {'preview':[token], 'ids':[ident]})[0], 202)
+        self.assertEqual((self.sandbox / 'inbox/request').read_text(), 'cleanup '+token+' '+ident)
+
+    def test_backups_pages(self):
+        self.ready('{"protocol":1,"backups_protocol":1,"state":"ready"}')
+        for q in ({'page':['-1']},{'page':['1000']},{'page':['../x']},{'page':['1','2']},{'path':['/x']}):
+            self.assertEqual(self.http('backups','POST',q)[0],400)
+        self.assertEqual(self.http('backups','POST',{'page':['1']})[0],202)
+        self.assertEqual((self.sandbox/'inbox/request').read_text(),'backups 1')
+
+    def test_backups_bounds_and_queue(self):
+        self.ready('{"protocol":1,"backups_protocol":1,"state":"ready"}')
+        ids = [f'{i:032x}' for i in range(21)]
+        for values in (ids, ['B'*32], ['b'*31], ['b'*33], ['b'*32, ''], ['b'*32+';id']):
+            self.assertEqual(self.http('cleanup', 'POST', {'preview':['a'*32], 'ids':[','.join(values)]})[0], 400)
+        for token in ('A'*32, 'a'*31, '../bad'):
+            self.assertEqual(self.http('cleanup', 'POST', {'preview':[token], 'ids':[ids[0]]})[0], 400)
+        self.assertEqual(self.http('cleanup', 'POST', {'preview':['a'*32], 'ids':[','.join(ids[:20])], 'path':['/etc']})[0], 400)
+        self.assertEqual(self.http('cleanup', 'POST', {'preview':['a'*32], 'ids':[','.join(ids[:20])]})[0], 202)
+        request = self.sandbox / 'inbox/request'
+        self.assertLessEqual(len(request.read_bytes()), 1024)
+        self.assertEqual(self.http('check', 'POST')[0], 409)
+        request.unlink()
+        (self.sandbox / 'processing').write_text('update v8.0.56')
+        self.assertEqual(self.http('backups', 'POST')[0], 409)
+
+    def test_backups_file(self):
+        p = self.sandbox / 'public/backups.json'
+        data = dict(protocol=1, state='ready', token='a'*32, items=[dict(id=f'{i:032x}', name='backup', kind='runtime', created_at='now', size_bytes=1, deletable=False, reason='protected') for i in range(100)], total_count=100, truncated=False)
+        p.write_text(json.dumps(data)); p.chmod(0o644)
+        self.assertEqual(self.http('backups')[0], 200)
+        self.assertEqual(len(json.loads(self.http('backups')[1])['items']), 100)
+        p.chmod(0o666)
+        self.assertEqual(self.http('backups')[0], 503)
+        p.chmod(0o644)
+        os.link(p, self.sandbox / 'linked')
+        self.assertEqual(self.http('backups')[0], 503)
+        (self.sandbox / 'linked').unlink(); p.unlink()
+        p.symlink_to(self.sandbox / 'public/status.json')
+        self.assertEqual(self.http('backups')[0], 503)
+        p.unlink()
+        for raw in ('x'*65537, '{} trailing', '{"protocol":1,"items":['+','.join('{}' for _ in range(101))+']}', '{"protocol":1,"items":[]}'):
+            p.write_text(raw); p.chmod(0o644)
+            self.assertEqual(self.http('backups')[0], 200 if raw == '{"protocol":1,"items":[]}' else 503)
+
     def test_metadata(self):
         m = self.invoke('plugin.register')['result']['metadata']
         self.assertEqual(m['GitHubRepository'], 'https://github.com/flying864/cliproxyapi-web-updater')

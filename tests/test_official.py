@@ -132,6 +132,30 @@ plugins:
             assert (run / 'inbox/request').read_text() == 'check'
             assert (run / 'inbox/request').stat().st_nlink == 1
             (run / 'inbox/request').unlink()
+            # Real host authorization and query serialization; no real worker here.
+            for endpoint, method in [('backups','GET'),('backups','POST'),('cleanup','POST')]:
+                result=request(api+'/'+endpoint,method,auth=False)
+                assert result['status']==401,result
+            result=request(api+'/backups','POST')
+            assert result['status']==503,result  # old worker capability gate
+            (public/'status.json').write_text(json.dumps(dict(protocol=1,backups_protocol=1,state='idle')))
+            result=request(api+'/backups','POST')
+            assert result['status']==202,result
+            assert (run/'inbox/request').read_text()=='backups'
+            (run/'inbox/request').unlink()
+            preview=dict(protocol=1,state='ready',token='a'*32,generated_at='2026-11-13T10:00:00Z',detail='isolated fixture',items=[],total_count=0,truncated=False)
+            (public/'backups.json').write_text(json.dumps(preview))
+            result=request(api+'/backups')
+            assert result['status']==200 and result['body']['token']==str(preview['token']),result
+            for query in ['?preview='+str(preview['token'])+'&ids=../wrong', '?preview='+str(preview['token'])+'&preview='+str(preview['token'])+'&ids='+'b'*32]:
+                result=request(api+'/cleanup'+query,'POST')
+                assert result['status'] in (400,409),result
+                assert not (run/'inbox/request').exists(),result
+            result=request(api+'/cleanup?preview='+str(preview['token'])+'&ids='+'b'*32,'POST')
+            assert result['status']==202,result
+            assert (run/'inbox/request').read_text()=='cleanup '+'a'*32+' '+'b'*32
+            (run/'inbox/request').unlink()
+            print('PASS: backup management official-host authorization, capability and bound queue routes')
             final_status = dict(protocol=1, worker_version='0.5.0', state='success', current='8.0.56', latest='v8.0.56', detail='test fixture final result')
             (public / 'status.json').write_text(json.dumps(final_status))
             proc.terminate(); proc.wait(timeout=8)

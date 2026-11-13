@@ -5,8 +5,8 @@ const html=source.split('static const char *html =')[1].split(';\n')[0].trim().s
 assert.match(html, /prefers-color-scheme: dark/);
 assert.match(html, /aria-describedby='key-help'/);
 assert.match(html, /<main/);
-assert.equal((html.match(/<button /g)||[]).length,2);
-const nodes={};for(const id of ['key','check','update','current','latest','state','when','detail','connection','release'])nodes[id]={value:'',textContent:'',disabled:false,hidden:false,removeAttribute(k){delete this[k]}};
+assert.equal((html.match(/<button /g)||[]).length,6);
+const nodes={};for(const id of ['key','check','update','current','latest','state','when','detail','connection','release','backup-scan','backup-delete','backup-state','backup-total','backup-list','backup-prev','backup-next','backup-page'])nodes[id]={value:'',textContent:'',disabled:false,hidden:false,replaceChildren(){},removeAttribute(k){delete this[k]}};
 let timers=[],pending=[],calls=[],timerId=0;
 const context={document:{getElementById:id=>nodes[id]},confirm:()=>true,encodeURIComponent,AbortController,setTimeout:(f,ms)=>{const id=++timerId;timers.push({id,f,ms});return id},clearTimeout:id=>{timers=timers.filter(t=>t.id!==id)},fetch:(url,options)=>{calls.push({url,options});return new Promise((resolve,reject)=>{const item={resolve,reject};pending.push(item);options.signal.addEventListener('abort',()=>{pending=pending.filter(x=>x!==item);reject(new Error('timeout'))})})}};
 vm.runInNewContext(html.match(/<script>([\s\S]*)<\/script>/)[1],context);

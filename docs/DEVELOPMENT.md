@@ -11,6 +11,9 @@ python3 -B scripts/check_release_version.py --tag v0.5.0
 python3 -B test_plugin.py
 node tests/test_panel.js
 node tests/test_panel_auth.js
+node tests/test_panel_backups.js
+python3 -B tests/test_backup_manager.py
+python3 -B tests/test_backup_install.py
 python3 -B tests/test_sanitizer.py
 python3 -B tests/test_version.py
 python3 -B tests/test_permissions.py
@@ -54,6 +57,7 @@ python -B tests/test_panel_browser.py
 
 ```bash
 sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_worker.py
+sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_backup_worker.py
 sudo env CPA_TEST_REAL_UID=1 python3 -B tests/test_install.py
 python3 -B tests/test_simple_install.py
 sudo python3 -B tests/test_runtime.py

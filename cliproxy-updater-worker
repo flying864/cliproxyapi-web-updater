@@ -18,7 +18,16 @@ LATEST=unknown
 PHASE=preflight
 TMPDIR_UPD=''
 PROCESS_ACTIVE=0
+BACKUP_ACTION=0
 BACKUP=''
+
+write_backup_error() {
+  local temp
+  temp=$(mktemp "$PUBLIC/.backups.XXXXXXXX") || return 1
+  printf '%s\n' '{"protocol":1,"state":"error","token":"","generated_at":"","detail":"备份操作未完成，请重新扫描；未自动重试删除。","items":[],"total_count":0,"truncated":false}' > "$temp"
+  chmod 0640 "$temp" && chown root:cliproxy "$temp" && sync -f "$temp" &&
+    mv -f -- "$temp" "$PUBLIC/backups.json" && sync -f "$PUBLIC"
+}
 
 write_status() {
   local phase="$1" message="$2" temp
@@ -26,7 +35,7 @@ write_status() {
   python3 - "$phase" "$message" "$CURRENT" "$LATEST" "${WORKER_VERSION:-0.5.0}" > "$temp" <<'PY'
 import json,sys,datetime
 phase,detail,current,latest=sys.argv[1:5]
-print(json.dumps(dict(protocol=1,worker_version=sys.argv[5],state=phase,detail=detail,current=current,latest=latest,
+print(json.dumps(dict(protocol=1,backups_protocol=1,worker_version=sys.argv[5],state=phase,detail=detail,current=current,latest=latest,
  updated_at=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds')),ensure_ascii=False))
 PY
   chmod 0640 "$temp"
@@ -72,7 +81,8 @@ cleanup() {
   trap - EXIT TERM INT HUP
   set +e
   if ((rc != 0)); then
-    if [[ -e "$TX" ]]; then recover || rc=1
+    if ((BACKUP_ACTION)); then write_backup_error
+    elif [[ -e "$TX" ]]; then recover || rc=1
     else write_status error "阶段 $PHASE 失败（退出码 $rc）"; fi
   fi
   # Under the common lock, retire a failed unconsumed request so PathExists
@@ -148,16 +158,8 @@ for p in ['/opt/cliproxyapi/.cli-proxy-api.new','/opt/cliproxyapi/.cli-proxy-api
   s=os.lstat(p); assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and not s.st_mode&0o022, 'Unsafe staging file: '+p
 PYSAFE
 MODE=${1:---check}
-case "$MODE" in --preflight|--check|--consume|--recover) ;; *) exit 2;; esac
-normal_preflight() {
-  python3 - <<'PYCONFIG'
-import os,stat,pwd,grp
-p='/opt/cliproxyapi/config.yaml'; s=os.lstat(p); uid=pwd.getpwnam('cliproxy').pw_uid; gid=grp.getgrnam('cliproxy').gr_gid
-assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid in (0,uid) and not s.st_mode&0o007
-assert not s.st_mode&0o020 or s.st_gid==gid
-shift=6 if s.st_uid==uid else 3 if s.st_gid==gid else 0
-assert (s.st_mode>>shift)&0o6==0o6, 'cliproxy must read/write config.yaml for management API'
-PYCONFIG
+case "$MODE" in --preflight|--check|--consume|--recover|--recover-update-failure) ;; *) exit 2;; esac
+trusted_helper() {
 # Fixed trusted helper only; no imports from application/plugins/cwd.
 python3 - "$HELPER" <<'PYHELPER'
 import os,stat,sys
@@ -167,14 +169,102 @@ for path in ['/usr','/usr/local','/usr/local/libexec',p]:
  assert s.st_uid==0 and not s.st_mode&0o022 and not stat.S_ISLNK(s.st_mode), 'Unsafe helper: '+path
 assert stat.S_ISREG(s.st_mode) and s.st_nlink==1
 PYHELPER
+}
+normal_preflight() {
+  python3 - <<'PYCONFIG'
+import os,stat,pwd,grp
+p='/opt/cliproxyapi/config.yaml'; s=os.lstat(p); uid=pwd.getpwnam('cliproxy').pw_uid; gid=grp.getgrnam('cliproxy').gr_gid
+assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid in (0,uid) and not s.st_mode&0o007
+assert not s.st_mode&0o020 or s.st_gid==gid
+shift=6 if s.st_uid==uid else 3 if s.st_gid==gid else 0
+assert (s.st_mode>>shift)&0o6==0o6, 'cliproxy must read/write config.yaml for management API'
+PYCONFIG
+trusted_helper
 python3 "$HELPER" preflight
   WORKER_VERSION=$(python3 "$HELPER" version)
 }
 if [[ "$MODE" == --preflight ]]; then normal_preflight; exit $?; fi
 exec 9>"$STATE/lock"
 flock -w 10 9 || exit 1
+if [[ "$MODE" == --recover-update-failure ]]; then
+  # systemd OnFailure must not turn a failed preview/deletion into a service restart.
+  # Only an interrupted validated update leaves this root-owned immutable marker.
+  needs_recovery=$(python3 - "$RUN/processing" <<'PYFAILURE'
+import os,re,stat,sys
+try:
+ fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ try:
+  s=os.fstat(fd)
+  valid=stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o400 and 0<s.st_size<=64
+  raw=os.read(fd,65) if valid else b''
+  print('yes' if valid and re.fullmatch(rb'update v[0-9]+[.][0-9]+[.][0-9]+',raw) else 'no')
+ finally:os.close(fd)
+except OSError:print('no')
+PYFAILURE
+  )
+  [[ "$needs_recovery" == yes ]] || exit 0
+  MODE=--recover
+  set -- --recover
+fi
+# Consume into the root-controlled processing path before classifying the command.
+# Backup requests deliberately bypass recovery and all service/network operations.
+if [[ "$MODE" != --recover ]]; then rm -f -- "$RUN/processing"; fi
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+ACTION=check
+EXPECTED=''
+if [[ "$MODE" == --consume ]]; then
+  PHASE=consume
+  BACKUP_ACTION=1 # Unknown input must never trigger service recovery.
+  FILE=$INBOX/request
+  [[ -f "$FILE" && ! -L "$FILE" ]] || exit 0
+  mv -T -- "$FILE" "$RUN/processing"
+  PROCESS_ACTIVE=1
+  REQUEST=$(python3 - "$RUN/processing" <<'PYREQUEST'
+import os,pwd,re,stat,sys
+fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+try:
+ s=os.fstat(fd)
+ assert stat.S_ISREG(s.st_mode) and s.st_uid==pwd.getpwnam('cliproxy').pw_uid and s.st_nlink==1 and 0<s.st_size<=1024
+ os.fchown(fd,0,0); os.fchmod(fd,0o400)
+ data=os.read(fd,1025)
+ assert len(data)==s.st_size and not os.read(fd,1)
+ text=data.decode('ascii')
+ if text not in ('check','backups') and not re.fullmatch(r'backups [0-9]{1,3}',text) and not re.fullmatch(r'update v[0-9]+[.][0-9]+[.][0-9]+',text):
+  m=re.fullmatch(r'cleanup ([0-9a-f]{32}) ([0-9a-f]{32}(?:,[0-9a-f]{32}){0,19})',text)
+  assert m and len(set(m[2].split(',')))==len(m[2].split(',')), 'Invalid cleanup request'
+ print(text,end='')
+finally: os.close(fd)
+PYREQUEST
+  ) || { echo 'Invalid worker request' >&2; exit 1; }
+  if [[ "$REQUEST" == backups || "$REQUEST" == backups\ * ]]; then
+    ACTION=backups
+  elif [[ "$REQUEST" == cleanup\ * ]]; then
+    ACTION=cleanup
+  elif [[ "$REQUEST" == update\ * ]]; then
+    ACTION=update
+    EXPECTED=${REQUEST#update }
+  fi
+fi
+if [[ "$ACTION" == backups || "$ACTION" == cleanup ]]; then
+  BACKUP_ACTION=1
+  PHASE=backups
+  trusted_helper
+  # No trap-triggered binary recovery or update-status overwrite on these paths.
+  if [[ "$ACTION" == backups ]]; then
+    if [[ "$REQUEST" == backups ]]; then python3 "$HELPER" backups-preview; else python3 "$HELPER" backups-preview "${REQUEST#backups }"; fi
+  else
+    read -r _ token ids <<< "$REQUEST"
+    python3 "$HELPER" backups-clean "$token" "$ids"
+  fi
+  exit 0
+fi
+BACKUP_ACTION=0
 # Owning the common lock proves any processing marker is stale.
 if [[ -e "$TX" ]]; then
+  trap - EXIT TERM INT HUP
   set +e
   recover
   rc=$?
@@ -199,43 +289,7 @@ PYSTATE
   # An inbox request remains owned by the path-trigger consumer, not recovery.
   exit 0
 fi
-rm -f -- "$RUN/processing"
-trap cleanup EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-trap 'exit 129' HUP
 normal_preflight
-
-ACTION=check
-EXPECTED=''
-case "${1:---check}" in
-  --check) ;;
-  --consume)
-    PHASE=consume
-    FILE=$INBOX/request
-    [[ -f "$FILE" && ! -L "$FILE" ]] || exit 0
-    [[ ! -e "$RUN/processing" ]] || { echo 'Already processing a request' >&2; exit 1; }
-    mv -T -- "$FILE" "$RUN/processing"
-    PROCESS_ACTIVE=1
-    [[ -f "$RUN/processing" && ! -L "$RUN/processing" ]] || { echo 'Bad request file' >&2; exit 1; }
-    [[ $(stat -c %u "$RUN/processing") == $(id -u cliproxy) ]] || { echo 'Bad request owner' >&2; exit 1; }
-    [[ $(stat -c %h "$RUN/processing") == 1 ]] || { echo 'Bad link count' >&2; exit 1; }
-    [[ $(stat -c %s "$RUN/processing") -le 64 ]] || { echo 'Oversized request' >&2; exit 1; }
-    chown root:root "$RUN/processing"
-    chmod 0400 "$RUN/processing"
-    REQUEST=$(cat "$RUN/processing")
-    if [[ "$REQUEST" == check ]]; then
-      ACTION=check
-    elif [[ "$REQUEST" =~ ^update\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-      ACTION=update
-      EXPECTED="${BASH_REMATCH[1]}"
-    else
-      echo 'Invalid action: only check or update vN.N.N allowed' >&2
-      exit 1
-    fi
-    ;;
-  *) echo 'Unsupported worker argument' >&2; exit 2 ;;
-esac
 
 HEADERS=$(curl --noproxy '*' -sS -D - -o /dev/null --max-time 4 http://127.0.0.1:8317/v8/management/config) || { echo 'Unable to contact running host' >&2; exit 1; }
 CURRENT=$(printf '%s' "$HEADERS" | python3 -c 'import re,sys; h=re.findall(r"(?im)^X-CPA-VERSION:[ \t]*v?([0-9]+\.[0-9]+\.[0-9]+)[ \t]*\r?$",sys.stdin.read()); print(h[0] if len(h)==1 else "")')
@@ -373,6 +427,9 @@ if wait_healthy "${LATEST#v}"; then
     CURRENT="${LATEST#v}"
     write_status success "成功升级到 $LATEST。原程序及数据备份：$BACKUP"
     finish_transaction
+    if ! python3 "$HELPER" backups-register runtime "${BACKUP##*/}"; then
+      printf 'WARNING: update succeeded; backup registration failed, retained protected.\n' >&2
+    fi
     exit 0
 fi
 printf 'New release failed health check, rolling back.\n' >&2

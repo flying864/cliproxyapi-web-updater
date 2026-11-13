@@ -100,6 +100,7 @@ spec=importlib.util.spec_from_file_location('actual_runtime','/source/updater_ru
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 if sys.argv[1:]==['version']:print(m.WORKER_VERSION)
 elif sys.argv[1:]==['preflight']:m.check_service()
+elif sys.argv[1]=='backups-register':m.backup_register(sys.argv[2],sys.argv[3])
 elif sys.argv[1:]==['verify-auth']:
  if os.environ.get('CASE')=='changed_auth':raise ValueError('auth-dir changed')
 elif sys.argv[1]=='snapshot':
@@ -143,6 +144,7 @@ if [[ $CPA_TEST_REAL_UID != 1 ]]; then
  # Local single-UID worker control-flow only. CI explicitly runs the real helper.
  cp /fixtures/local_snapshot_boundary.py /usr/local/libexec/cliproxy-updater-runtime.py
 fi
+chmod 0700 /var/lib/cliproxy-updater /var/lib/cliproxy-updater/backups
 chmod 0730 /run/cliproxy-updater/inbox
 printf fixture-only > /root/cliproxyapi-admin-key
 chmod 0600 /root/cliproxyapi-admin-key
@@ -168,10 +170,11 @@ if [[ $CASE == unsafe_new ]]; then ln -s /opt/cliproxyapi/config.yaml /opt/clipr
 bash /source/cliproxy-updater-worker --consume > /sim/worker.log 2>&1
 rc=$?
 printf '%s' "$rc" > /sim/exit-code
-if [[ $CASE == killed ]]; then CASE=offline bash /source/cliproxy-updater-worker --recover >> /sim/worker.log 2>&1; fi
+if [[ $CASE == killed ]]; then CASE=offline bash /source/cliproxy-updater-worker --recover-update-failure >> /sim/worker.log 2>&1; fi
 [[ ! -e /var/lib/cliproxy-updater/transaction.json ]] || touch /sim/transaction-left
 [[ ! -e /opt/cliproxyapi/.cli-proxy-api.rollback ]] || touch /sim/rollback-left
 cp /var/lib/cliproxy-updater-status/status.json /sim/status.json
+[[ ! -e /var/lib/cliproxy-updater/backup-registry.json ]] || cp /var/lib/cliproxy-updater/backup-registry.json /sim/backup-registry.json
 [[ ! -e /run/cliproxy-updater/processing ]] || touch /sim/processing-left
 /opt/cliproxyapi/cli-proxy-api --version > /sim/installed-version
 '''
@@ -200,7 +203,11 @@ class WorkerTests(unittest.TestCase):
      self.assertNotIn('stop cliproxyapi.service',(sim/'systemctl.log').read_text())
     if state:
      status=json.loads((sim/'status.json').read_text()); self.assertEqual(status['state'],state,log)
-     if state=='success': self.assertEqual(status['current'],'8.0.56')
+     if state=='success':
+      self.assertEqual(status['current'],'8.0.56')
+      self.assertTrue((sim/'backup-registry.json').exists(),log)
+      self.assertEqual(len(json.loads((sim/'backup-registry.json').read_text())),1)
+     else: self.assertFalse((sim/'backup-registry.json').exists(),log)
     self.assertFalse((sim/'processing-left').exists(),log)
     if case=='unsafe_new': self.assertNotEqual((sim/'exit-code').read_text(),'0',log)
     self.assertEqual((sim/'transaction-left').exists(),case=='rollback_copy_failure',log)

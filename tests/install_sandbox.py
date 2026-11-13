@@ -136,7 +136,8 @@ def inside(scenario):
         assert config==old
         assert not Path('/opt/cliproxyapi/plugins/cpa-updater.so').exists()
         assert Path('/usr/local/libexec/cliproxy-updater-runtime.py').is_file()
-        assert json.loads(Path('/var/lib/cliproxy-updater-status/status.json').read_text())['protocol']==1
+        assert json.loads(Path('/var/lib/cliproxy-updater-status/status.json').read_text())['backups_protocol']==1
+        assert len(json.loads(Path('/var/lib/cliproxy-updater/backup-registry.json').read_text()))==1
     elif scenario == 'identity': invoke('install.sh',False)
     elif scenario in ('api','registered'):
         invoke('install.sh',False)
@@ -144,6 +145,8 @@ def inside(scenario):
         assert not Path('/opt/cliproxyapi/plugins/cpa-updater.so').exists()
     else:
         invoke('install.sh')
+        registry=json.loads(Path('/var/lib/cliproxy-updater/backup-registry.json').read_text())
+        assert len(registry)==1 and next(iter(registry.values()))['kind']=='install'
         st = libexec.stat(); assert st.st_uid == 0 and st.st_mode & 0o022 == 0 and not libexec.is_symlink()
         assert Path('/opt/cliproxyapi/plugins').stat().st_mode&0o777==0o700
         for p,mode in [('/var/lib/cliproxy-updater',0o700),('/var/lib/cliproxy-updater/backups',0o700),('/run/cliproxy-updater',0o750),('/run/cliproxy-updater/inbox',0o730),('/var/lib/cliproxy-updater-status',0o750)]:

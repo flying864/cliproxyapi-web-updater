@@ -152,6 +152,12 @@ static const char *html =
 "<p class='help result-help'>服务重启时页面会自动重连。短暂断线不代表更新失败，请以恢复后的状态为准。</p>\n"
 "</section>\n"
 "</div>\n"
+"<details class='card'><summary>备份管理</summary>\n"
+"<p class='help'>仅主动扫描；默认不选择。每次最多永久删除 20 组，不可恢复。</p>\n"
+"<div class='actions'><button id='backup-scan' type='button' disabled>扫描 / 刷新预览</button><button id='backup-delete' type='button' disabled>永久删除所选</button></div>\n"
+"<p id='backup-state' role='status' aria-live='polite'>请先连接并主动扫描</p>\n"
+"<p id='backup-total'>已选择 0 组 · 0 字节</p><div class='actions'><button id='backup-prev' disabled>上一页</button><button id='backup-next' disabled>下一页</button></div><p id='backup-page'></p><div id='backup-list'></div>\n"
+"</details>\n"
 "<footer><span>CPA Web Updater · 第三方更新插件</span><a class='docs' href='https://github.com/flying864/cliproxyapi-web-updater#readme' target='_blank' rel='noopener noreferrer'>使用文档 ↗</a><span>检查 → 确认 → 更新</span></footer>\n"
 "<noscript><p class='notice'>请启用 JavaScript 后使用版本检查与更新功能。</p></noscript>\n"
 "</main>\n"
@@ -174,10 +180,58 @@ static const char *html =
 "const version=v=>typeof v==='string'&&v.length<40&&/^v[0-9]+[.][0-9]+[.][0-9]+$/.test(v);\n"
 "const terminal=new Set(['idle','ready','current','needs_recheck','up_to_date','success','error','failed','rollback_failed','rolled_back','interrupted','setup_required','needs_setup']);\n"
 "const signature=j=>JSON.stringify([j.state,j.updated_at,j.detail,j.current,j.latest]);\n"
+"let backup=null,backupBusy=false,backupBaseline='',backupQueued=null,backupReceived=0;\n"
+"const selected=new Map(),hex=v=>typeof v==='string'&&/^[a-f0-9]{32}$/.test(v);\n"
+"function backupButtons(enabled){\n"
+"  if(!el('backup-scan'))return;if(backup&&hex(backup.token)&&Date.now()-backupReceived>=600000){backup.token='';selected.clear();el('backup-state').textContent='预览已过期，请重新扫描后选择；未执行删除。';el('backup-total').textContent='已选择 0 组';}\n"
+"  el('backup-scan').disabled=!(enabled&&last.backups_protocol===1&&!backupBusy);el('backup-prev').disabled=el('backup-scan').disabled||!backup||!(backup.page>0);el('backup-next').disabled=el('backup-scan').disabled||!backup||!(backup.page+1<backup.page_count);\n"
+"  el('backup-delete').disabled=!(enabled&&last.backups_protocol===1&&!backupBusy&&backup&&hex(backup.token)&&selected.size>0&&selected.size<=20);\n"
+"  if(last&&last.backups_protocol!==1)el('backup-state').textContent='备份后台需要更新；原版本检查与更新仍可使用';\n"
+"}\n"
+"function selection(){\n"
+"  let size=0;for(const item of selected.values())size+=item.size_bytes;\n"
+"  el('backup-total').textContent='已选择 '+selected.size+' 组 · '+backupSize(size);buttons();\n"
+"}\n"
+"function clearBackups(){\n"
+"  backup=null;backupBusy=false;backupQueued=null;selected.clear();\n"
+"  if(el('backup-list')){el('backup-list').replaceChildren();el('backup-page').textContent='';el('backup-state').textContent='请主动扫描备份';selection();}\n"
+"}\n"
+"const backupReason=r=>({'unregistered or unsafe backup':'历史未登记或不安全，需人工核查','backup identity or content changed':'文件已变化，禁止清理','unsafe backup':'备份不安全，禁止清理','latest successful backup':'保留：最近完整成功备份','active transaction':'正在恢复，禁止清理'}[r]||r||'可选择');\n"
+"const backupSize=n=>n>=1073741824?(n/1073741824).toFixed(2)+' GiB':n>=1048576?(n/1048576).toFixed(2)+' MiB':n>=1024?(n/1024).toFixed(2)+' KiB':n+' 字节';\n"
+"function renderBackups(j){\n"
+"  selected.clear();backup=null;el('backup-list').replaceChildren();\n"
+"  if(j.protocol!==1||!Array.isArray(j.items)||j.items.length>100){el('backup-state').textContent='无效备份结果';selection();return;}\n"
+"  backup=j;backupReceived=Date.now();el('backup-page').textContent=j.state==='ready'?'第 '+((j.page||0)+1)+' / '+(j.page_count||1)+' 页 · 共 '+j.total_count+' 组':'请重新扫描核对剩余备份';el('backup-state').textContent=({ready:'预览就绪',success:'清理完成',error:'未完成'}[j.state]||String(j.state||''))+' · '+String(j.detail||'')+(j.truncated?' · 当前仅显示本页，请翻页查看其余备份':'');\n"
+"  for(const item of j.items){\n"
+"    const row=document.createElement('label'),box=document.createElement('input'),text=document.createElement('span');\n"
+"    row.style='display:flex;gap:8px;align-items:flex-start;min-height:44px;margin:12px 0;overflow-wrap:anywhere';text.style='min-width:0;font-weight:400;white-space:pre-line;line-height:1.6';box.type='checkbox';box.style='width:auto;flex-shrink:0';box.checked=false;box.disabled=!(item.deletable===true&&hex(item.id)&&hex(j.token)&&Number.isSafeInteger(item.size_bytes)&&item.size_bytes>=0);\n"
+"    box.onchange=()=>{if(box.disabled)return;if(box.checked){if(selected.size>=20){box.checked=false;return;}selected.set(item.id,item);}else selected.delete(item.id);selection();};\n"
+"    text.textContent=' '+String(item.name)+'\\n'+String(item.created_at||'时间未登记')+'\\n'+(item.kind==='runtime'?'主程序备份':'安装快照')+' · '+backupSize(item.size_bytes)+'\\n'+backupReason(item.reason);\n"
+"    row.appendChild(box);row.appendChild(text);el('backup-list').appendChild(row);\n"
+"  }\n"
+"  selection();\n"
+"}\n"
+"function backupSubmit(clean=false,page){\n"
+"  if(syncKey()){request('/status');return;}\n"
+"  buttons();if(el(clean?'backup-delete':'backup-scan').disabled||waiting||backupBusy)return;\n"
+"  let path=Number.isInteger(page)?'/backups?page='+page:'/backups';\n"
+"  if(clean){\n"
+"    const token=backup.token,ids=[...selected.keys()].join(',');\n"
+"    if(!confirm('永久删除 '+selected.size+' 组备份（'+el('backup-total').textContent+'）？不可恢复。'))return;\n"
+"    if(syncKey()){request('/status');return;}\n"
+"    if(!backup||backup.token!==token)return;\n"
+"    path='/cleanup?preview='+token+'&ids='+ids;\n"
+"  }\n"
+"  backupBaseline=JSON.stringify(backup);backupBusy=true;backupQueued=path;selected.clear();selection();\n"
+"  if(!inflight){backupQueued=null;request(path,'POST');}\n"
+"}\n"
+"el('backup-scan').onclick=()=>backupSubmit();\n"
+"el('backup-delete').onclick=()=>backupSubmit(true);el('backup-prev').onclick=()=>backupSubmit(false,(backup?.page||0)-1);el('backup-next').onclick=()=>backupSubmit(false,(backup?.page||0)+1);\n"
 "function buttons(){\n"
 "  const enabled=!!el('key').value.trim()&&el('key').value.trim()===observedKey&&online&&!waiting&&last&&last.pending!==true&&last.protocol===1&&terminal.has(last.state)&&!['setup_required','needs_setup'].includes(last.state);\n"
-"  el('check').disabled=!enabled;\n"
-"  el('update').disabled=!(enabled&&last.state==='ready'&&version(last.latest));\n"
+"  backupButtons(enabled);\n"
+"  el('check').disabled=!enabled||backupBusy;\n"
+"  el('update').disabled=!(enabled&&!backupBusy&&last.state==='ready'&&version(last.latest));\n"
 "}\n"
 "function render(j){\n"
 "  last=j;\n"
@@ -190,7 +244,7 @@ static const char *html =
 "}\n"
 "function schedule(){\n"
 "  clearTimeout(timer);\n"
-"  timer=setTimeout(()=>request('/status'),2000);\n"
+"  timer=setTimeout(()=>request(backupBusy?'/backups':'/status'),2000);\n"
 "}\n"
 "async function request(path,method='GET'){\n"
 "  if(syncKey()&&method==='POST'){request('/status');return;}\n"
@@ -213,12 +267,14 @@ static const char *html =
 "    if(!r.ok){\n"
 "      online=false;\n"
 "      el('connection').textContent='HTTP '+r.status+'：'+(j.error||'请求未被接受');\n"
-"      if(method==='POST')waiting=false;\n"
+"      if(method==='POST'){waiting=false;backupBusy=false;}if(path.startsWith('/backups')){clearBackups();el('backup-state').textContent='无法读取备份结果，请重新扫描；不会自动重试删除。';}\n"
 "      return;\n"
 "    }\n"
 "    online=true;\n"
 "    el('connection').textContent='已连接';\n"
-"    if(method==='GET'){\n"
+"    if(path.split('?')[0]==='/backups'&&method==='GET'){\n"
+"      if(j.pending!==true){backupBusy=false;if(JSON.stringify(j)!==backupBaseline)renderBackups(j);else{clearBackups();el('backup-state').textContent='未取得新的操作结果；可能未提交或已中断，请重新扫描核对。';}}\n"
+"    }else if(method==='GET'){\n"
 "      if(waiting&&(signature(j)!==baseline||(uncertain&&j.pending===false&&terminal.has(j.state)))){\n"
 "        waiting=false;\n"
 "        uncertain=false;\n"
@@ -226,6 +282,7 @@ static const char *html =
 "      render(j);\n"
 "    }\n"
 "    else{\n"
+"      if(path.startsWith('/backups')||path.startsWith('/cleanup'))el('backup-state').textContent='请求已排队，等待后台结果；尚未确认删除';\n"
 "      el('connection').textContent='请求已提交，等待状态更新';\n"
 "    }\n"
 "  }\n"
@@ -241,6 +298,11 @@ static const char *html =
 "    inflight=false;\n"
 "    syncKey();\n"
 "    if(epoch!==generation){request('/status');return;}\n"
+"    if(backupQueued){\n"
+"      const next=backupQueued;backupQueued=null;\n"
+"      if(online&&last&&last.backups_protocol===1&&last.pending!==true&&terminal.has(last.state)){request(next,'POST');return;}\n"
+"      backupBusy=false;el('backup-state').textContent='操作未提交：后台忙或连接不可用，请重新扫描';\n"
+"    }\n"
 "    if(queued){\n"
 "      const path=queued;queued=null;\n"
 "      if(online&&last&&last.protocol===1&&last.pending!==true&&terminal.has(last.state)&&!['setup_required','needs_setup'].includes(last.state)&&(path==='/check'||(last.state==='ready'&&version(last.latest)))){waiting=true;uncertain=false;baseline=signature(last);request(path,'POST');return;}\n"
@@ -308,6 +370,7 @@ static const char *html =
 "  const key=el('key').value.trim();\n"
 "  if(key===observedKey)return false;\n"
 "  observedKey=key;generation++;online=false;last=null;queued=null;waiting=false;uncertain=false;\n"
+"  clearBackups();\n"
 "  for(const id of ['current','latest','when'])el(id).textContent='—';\n"
 "  el('detail').textContent='';el('release').hidden=true;el('release').removeAttribute('href');\n"
 "  el('state').textContent=key?'正在连接':'等待连接';\n"
@@ -350,7 +413,7 @@ static int send_error(cliproxy_buffer *r,int status,const char *message){
 }
 /* Token offsets are bounded by the ABI length. Validate separators as jsmn
  * alone deliberately tokenizes some non-JSON syntax. Never search nested keys. */
-typedef struct { const char *s; size_t len; jsmntok_t t[1024]; int n; } document;
+typedef struct { const char *s; size_t len; jsmntok_t *t; int capacity; jsmntok_t small[1024]; int n; } document;
 static void whitespace(const document *d,int *p){
   while((size_t)*p<d->len && strchr(" \t\r\n",d->s[*p]))++*p;
 }
@@ -396,14 +459,16 @@ static int grammar(document *d,int *i,int *pos,int depth){
   }
   return 1;
 }
-static int parse(document *d,const char *s,size_t len){
+static int parse_tokens(document *d,const char *s,size_t len,jsmntok_t *tokens,int capacity){
+  d->t=tokens;d->capacity=capacity;
   if(!s || !len || memchr(s,0,len))return 0;
   d->s=s;d->len=len;jsmn_parser p;jsmn_init(&p);
-  d->n=jsmn_parse(&p,s,len,d->t,1024);
+  d->n=jsmn_parse(&p,s,len,d->t,(unsigned)capacity);
   if(d->n<1 || d->t[0].type!=JSMN_OBJECT)return 0;
   int i=0,pos=0;if(!grammar(d,&i,&pos,0))return 0;
   whitespace(d,&pos);return i==d->n && (size_t)pos==len;
 }
+static int parse(document *d,const char *s,size_t len){return parse_tokens(d,s,len,d->small,1024);}
 static int member(const document *d,int object,const char *name){
   if(object<0 || d->t[object].type!=JSMN_OBJECT)return -1;
   for(int i=object+1;i<d->n && d->t[i].start<d->t[object].end;i++)
@@ -466,7 +531,14 @@ static int get_status(cliproxy_buffer *r){
 static int queue_job(cliproxy_buffer *r,const char *action,const char *expected){
   char status[8194];int status_n=read_status(status,sizeof(status));
   if(!compatible(status,status_n))return send_error(r,503,"请先初始化兼容的更新组件");
-  char task[64];
+  char task[1025];
+  if(!strcmp(action,"backups")||!strcmp(action,"cleanup")){
+    document d;parse(&d,status,(size_t)status_n);int i=member(&d,0,"backups_protocol");
+    if(i<0||d.t[i].type!=JSMN_PRIMITIVE||d.t[i].end-d.t[i].start!=1||status[d.t[i].start]!='1')return send_error(r,503,"备份后台需要更新");
+    if(!strcmp(action,"cleanup"))snprintf(task,sizeof(task),"cleanup %s",expected);
+    else if(expected)snprintf(task,sizeof(task),"backups %s",expected);
+    else strcpy(task,"backups");
+  }else
   if(!strcmp(action,"update")){
     if(!expected || !valid_version(expected))return send_error(r,409,"缺少或无效的确认版本");
     char state[32],latest[40];
@@ -491,12 +563,52 @@ static int queue_job(cliproxy_buffer *r,const char *action,const char *expected)
   return deliver(r,202,"application/json; charset=utf-8","{\"message\":\"任务已提交\"}");
 }
 
+static int hex32(const char *s){
+  if(strlen(s)!=32)return 0;
+  for(int i=0;i<32;i++)if(!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f')))return 0;
+  return 1;
+}
+static int get_backups(cliproxy_buffer *r){
+  /* Never expose a previous operation's result while any request is queued. */
+  struct stat queued;
+  if(lstat(REQUEST_FILE,&queued)==0||errno!=ENOENT||lstat(PROCESSING_FILE,&queued)==0||errno!=ENOENT)
+    return deliver(r,200,"application/json; charset=utf-8","{\"protocol\":1,\"pending\":true,\"state\":\"pending\",\"token\":\"\",\"items\":[]}");
+  int fd=open(CPA_PUBLIC "/backups.json",O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+  if(fd<0){
+    if(errno==ENOENT)return deliver(r,200,"application/json; charset=utf-8","{\"protocol\":1,\"state\":\"error\",\"pending\":false,\"token\":\"\",\"items\":[],\"detail\":\"尚无扫描结果，请重新扫描\"}");
+    return send_error(r,503,"无法读取备份预览");
+  }
+  struct stat st;
+  if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=CPA_STATUS_UID||(st.st_mode&022)||st.st_nlink!=1||st.st_size<=0||st.st_size>65536){close(fd);return send_error(r,503,"无效备份清单");}
+  char *buf=malloc(65537); document *d=calloc(1,sizeof(*d)); jsmntok_t *tokens=calloc(16384,sizeof(*tokens));
+  if(!buf||!d||!tokens){close(fd);free(buf);free(d);free(tokens);return 1;}
+  size_t n=0;int bad=0;
+  while(n<65537){ssize_t got=read(fd,buf+n,65537-n);if(got<0&&errno==EINTR)continue;if(got<0){bad=1;break;}if(!got)break;n+=(size_t)got;}
+  close(fd);
+  int ok=!bad&&n==(size_t)st.st_size&&n<=65536&&parse_tokens(d,buf,n,tokens,16384);
+  if(ok){int i=member(d,0,"items"),proto=member(d,0,"protocol");ok=i>=0&&d->t[i].type==JSMN_ARRAY&&d->t[i].size<=100&&proto>=0&&d->t[proto].type==JSMN_PRIMITIVE&&d->t[proto].end-d->t[proto].start==1&&buf[d->t[proto].start]=='1';}
+  int rc;if(ok){buf[n]=0;rc=deliver(r,200,"application/json; charset=utf-8",buf);}else rc=send_error(r,503,"无效备份清单");
+  free(buf);free(d);free(tokens);return rc;
+}
+static int cleanup_request(cliproxy_buffer *r,const document *d,int query){
+  char token[33],ids[660],command[700];
+  int a=member(d,query,"preview"),b=member(d,query,"ids");
+  if(query<0||d->t[query].size!=2||a<0||b<0||d->t[a].type!=JSMN_ARRAY||d->t[a].size!=1||d->t[b].type!=JSMN_ARRAY||d->t[b].size!=1||!string_value(d,a+1,token,sizeof(token))||!hex32(token)||!string_value(d,b+1,ids,sizeof(ids)))return send_error(r,400,"无效清理参数");
+  char copy[660];strcpy(copy,ids);char *cursor=copy,*part;char *seen[20];int count=0;
+  while((part=strsep(&cursor,","))!=NULL){
+    if(count==20||!hex32(part))return send_error(r,400,"无效备份标识");
+    for(int i=0;i<count;i++)if(!strcmp(seen[i],part))return send_error(r,400,"重复备份标识");
+    seen[count++]=part;
+  }
+  if(!count)return send_error(r,400,"未选择备份");
+  snprintf(command,sizeof(command),"%s %s",token,ids);return queue_job(r,"cleanup",command);
+}
 static int plugin_call(char *method,uint8_t *req,size_t len,cliproxy_buffer *response){
   response->ptr=NULL;response->len=0;
   if(!strcmp(method,"plugin.register")||!strcmp(method,"plugin.reconfigure"))
     return respond(response,"{\"ok\":true,\"result\":{\"schema_version\":1,\"metadata\":{\"Name\":\"CPA Web Updater\",\"Version\":\"0.5.0\",\"Author\":\"Local deployment\",\"GitHubRepository\":\"https://github.com/flying864/cliproxyapi-web-updater\",\"Logo\":\"\",\"ConfigFields\":[]},\"capabilities\":{\"management_api\":true}}}");
   if(!strcmp(method,"management.register"))
-    return respond(response,"{\"ok\":true,\"result\":{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/cpa-updater/status\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/check\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/update\"}],\"resources\":[{\"Path\":\"/panel\",\"Menu\":\"CPA 一键更新\",\"Description\":\"检查版本、安装更新和回滚\"}]}}");
+    return respond(response,"{\"ok\":true,\"result\":{\"routes\":[{\"Method\":\"GET\",\"Path\":\"/plugins/cpa-updater/status\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/check\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/update\"},{\"Method\":\"GET\",\"Path\":\"/plugins/cpa-updater/backups\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/backups\"},{\"Method\":\"POST\",\"Path\":\"/plugins/cpa-updater/cleanup\"}],\"resources\":[{\"Path\":\"/panel\",\"Menu\":\"CPA 一键更新\",\"Description\":\"检查版本、安装更新和回滚\"}]}}");
   if(strcmp(method,"management.handle"))return respond(response,"{\"ok\":false,\"error\":{\"code\":\"unknown_method\",\"message\":\"Unknown plugin method\"}}");
   if(len>65536)return send_error(response,413,"请求过长");
   document d;
@@ -508,6 +620,14 @@ static int plugin_call(char *method,uint8_t *req,size_t len,cliproxy_buffer *res
   if(version>=0 && d.t[version].type==JSMN_ARRAY && d.t[version].size==1)
     string_value(&d,version+1,expected,sizeof(expected));
   int is_get=!strcmp(http_method,"GET"),is_post=!strcmp(http_method,"POST");
+  if(!strcmp(path,"/v0/management/plugins/cpa-updater/backups")){if(is_get)return get_backups(response);if(is_post){
+    if(query<0||d.t[query].size==0)return queue_job(response,"backups",NULL);
+    int page=member(&d,query,"page");char number[4];
+    if(d.t[query].type!=JSMN_OBJECT||d.t[query].size!=1||page<0||d.t[page].type!=JSMN_ARRAY||d.t[page].size!=1||!string_value(&d,page+1,number,sizeof(number))||!number[0])return send_error(response,400,"无效页码");
+    for(int k=0;number[k];k++)if(number[k]<'0'||number[k]>'9')return send_error(response,400,"无效页码");
+    return queue_job(response,"backups",number);
+  }}
+  if(!strcmp(path,"/v0/management/plugins/cpa-updater/cleanup")&&is_post)return cleanup_request(response,&d,query);
   if(!strcmp(path,"/v0/management/plugins/cpa-updater/status")&&is_get)return get_status(response);
   if(!strcmp(path,"/v0/management/plugins/cpa-updater/check")&&is_post)return queue_job(response,"check",NULL);
   if(!strcmp(path,"/v0/management/plugins/cpa-updater/update")&&is_post)return queue_job(response,"update",expected);

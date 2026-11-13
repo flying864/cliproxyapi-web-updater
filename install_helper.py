@@ -28,7 +28,7 @@ RUNTIME = Path('/usr/local/libexec/cliproxy-updater-runtime.py')
 PUBLIC = Path('/var/lib/cliproxy-updater-status')
 TMPFILE = Path('/etc/tmpfiles.d/cliproxy-updater.conf')
 TRIGGERS = ['cliproxy-updater.path', 'cliproxy-updater-check.timer']
-SERVICES = ['cliproxy-updater.service', 'cliproxy-updater-check.service', 'cliproxy-updater-recover.service']
+SERVICES = ['cliproxy-updater.service', 'cliproxy-updater-check.service', 'cliproxy-updater-recover.service', 'cliproxy-updater-failure.service']
 BASE = 'http://127.0.0.1:8317'
 
 
@@ -320,11 +320,12 @@ def health(api, installed, budget=30):
 
 def units():
     result = {}
-    for suffix, mode, timeout in [('service', '--consume', 900), ('check.service', '--check', 900), ('recover.service', '--recover', 300)]:
+    for suffix, mode, timeout in [('service', '--consume', 900), ('check.service', '--check', 900), ('recover.service', '--recover', 300), ('failure.service', '--recover-update-failure', 300)]:
         recover = mode == '--recover'
         head = '[Unit]\nDescription=CLIProxyAPI updater ' + mode + '\nAfter=cliproxyapi.service network-online.target\n'
-        if not recover:
-            head += 'OnFailure=cliproxy-updater-recover.service\n'
+        if mode in ('--consume', '--check'):
+            # The failure hook only recovers a root-owned interrupted update request.
+            head += 'OnFailure=cliproxy-updater-failure.service\n'
         body = '[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/libexec/cliproxy-updater-worker ' + mode + '\n'
         body += f'TimeoutStartSec={timeout}\nTimeoutStopSec=180\nMemoryMax=384M\nTasksMax=64\nLimitNOFILE=256\n'
         body += 'AmbientCapabilities=CAP_SETUID\nPrivateTmp=true\nNoNewPrivileges=true\nProtectSystem=strict\nReadWritePaths=/opt/cliproxyapi /var/lib/cliproxy-updater /var/lib/cliproxy-updater-status /run/cliproxy-updater\nProtectHome=read-only\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n'
@@ -403,11 +404,24 @@ def initialize_status():
             raise RuntimeError('不安全的持久状态文件')
         value = json.loads(target.read_text())
         if value.get('protocol') == 1:
+            value['backups_protocol'] = 1
+            value['worker_version'] = runtime_module().WORKER_VERSION
+            atomic_write(target, json.dumps(value, ensure_ascii=False).encode(), 0o640)
+            os.chown(target, 0, grp.getgrnam('cliproxy').gr_gid, follow_symlinks=False)
             return
-    data = json.dumps(dict(protocol=1, worker_version=runtime_module().WORKER_VERSION, state='idle',
+    data = json.dumps(dict(protocol=1, backups_protocol=1, worker_version=runtime_module().WORKER_VERSION, state='idle',
         detail='更新服务已初始化，点击检查更新', current='unknown', latest='unknown'), ensure_ascii=False).encode()
     atomic_write(target, data, 0o640)
     os.chown(target, 0, grp.getgrnam('cliproxy').gr_gid, follow_symlinks=False)
+
+
+def register_backup(backup):
+    # Called only after full installation verification under the common lock.
+    # Registration failure must not roll back a healthy installation.
+    try:
+        command('python3', str(RUNTIME), 'backups-register', 'install', backup.name, timeout=120)
+    except Exception:
+        print('警告：安装已成功，但备份登记失败；该备份保留且不能通过网页删除。', file=sys.stderr)
 
 
 def hot_name(data):
@@ -915,7 +929,8 @@ def run(installing, worker_only=False, hot_reload=False):
                     if old:
                         (backup / str(i)).write_bytes(old[0])
                 (backup / 'manifest.json').write_text(json.dumps({str(p): i for i, p in enumerate(snapshots)}))
-                shutil.copy2(APP / 'config.yaml', backup / 'config.yaml')
+                shutil.copyfile(APP / 'config.yaml', backup / 'config.yaml')
+                (backup / 'config.yaml').chmod(0o600)
                 changed = True
                 if installing:
                     if not worker_only:
@@ -964,6 +979,8 @@ def run(installing, worker_only=False, hot_reload=False):
                         ctl('enable', '--now', u)
                         if not query('is-active', u) or not query('is-enabled', u):
                             raise RuntimeError('触发器启用未生效')
+                if installing:
+                    register_backup(backup)
                 print(('安装' if installing else '卸载') + '已验证完成；用户数据及备份保留于 ' + str(backup))
             except BaseException:
                 failures = []

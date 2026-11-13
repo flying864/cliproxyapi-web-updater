@@ -77,6 +77,42 @@ class PanelBrowser(unittest.TestCase):
         else:
             route.abort()
 
+    def test_backup_preview_cancel_confirm_and_mobile_layout(self):
+        preview=dict(protocol=1,state='ready',token='a'*32,generated_at='fixture',detail='仅预览，未删除备份',total_count=2,truncated=False,items=[
+            dict(id='b'*32,name='20261113-120000-8.0.55',kind='runtime',created_at='2026-11-13T12:00:00Z',size_bytes=1048576,deletable=True,reason=''),
+            dict(id='c'*32,name='20261113-120001-8.0.56',kind='runtime',created_at='2026-11-13T12:00:01Z',size_bytes=1048576,deletable=False,reason='latest successful backup')])
+        def backup_route(route):
+            if route.request.method=='POST':
+                self.posts.append(route.request.url)
+                route.fulfill(status=202,content_type='application/json',body='{"message":"queued"}')
+            else:route.fulfill(status=200,content_type='application/json',body=json.dumps(preview))
+        self.page.route('**/v0/management/plugins/cpa-updater/backups',backup_route)
+        self.page.route('**/v0/management/plugins/cpa-updater/cleanup?*',backup_route)
+        self.status=dict(READY,backups_protocol=1)
+        self.page.set_viewport_size(dict(width=390,height=844))
+        self.page.goto(ORIGIN+PANEL);self.page.locator('#key').fill('browser-test-only')
+        self.page.wait_for_function("!document.getElementById('backup-scan').disabled")
+        self.page.locator('summary').click()
+        self.assertEqual(self.posts,[])
+        self.page.locator('#backup-scan').click()
+        self.page.wait_for_function("document.querySelectorAll('#backup-list input').length===2")
+        boxes=self.page.locator('#backup-list input');self.assertFalse(boxes.nth(0).is_checked());self.assertTrue(boxes.nth(1).is_disabled())
+        self.assertTrue(self.page.locator('#backup-delete').is_disabled())
+        self.assertIn('1.00 MiB',self.page.locator('#backup-list').inner_text())
+        boxes.nth(0).check()
+        self.page.once('dialog',lambda dialog:dialog.dismiss())
+        self.page.locator('#backup-delete').click()
+        self.assertEqual(len(self.posts),1,'cancel only leaves the scan POST')
+        screenshot=Path(__file__).resolve().parents[1]/'test-output/backup-panel-mobile.png'
+        screenshot.parent.mkdir(exist_ok=True)
+        self.page.screenshot(path=str(screenshot),full_page=True)
+        self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'),390)
+        self.page.once('dialog',lambda dialog:dialog.accept())
+        self.page.locator('#backup-delete').click()
+        self.page.wait_for_function("document.getElementById('backup-state').textContent.includes('排队')")
+        self.assertEqual(len(self.posts),2)
+        self.assertIn('preview='+'a'*32+'&ids='+'b'*32,self.posts[-1])
+
     def test_first_paint_without_click_standalone_and_iframe(self):
         for embedded in [False, True]:
             self.page.goto(ORIGIN + ('/embedded' if embedded else PANEL))
