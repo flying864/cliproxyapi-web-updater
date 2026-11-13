@@ -1,8 +1,39 @@
 # 更新插件
 
-更新 **CPA Web Updater 插件页面**，不升级 CLIProxyAPI 主程序。
+更新 **CPA Web Updater 插件及配套后台**，不升级 CLIProxyAPI 主程序。以下命令固定到已通过 GitHub 验收的源码提交 `543b2c96cf061e9fe9bfd8900c987c19c244f552`。
 
-## 推荐：热更新，不重启主服务
+## 本次备份管理更新：后台 + 页面
+
+**需要“备份管理”的用户用这一节。** 只更新页面不会给旧 Worker 增加清理能力。适用于已经初始化、符合本仓库布局的部署；先备份重要配置与账号数据，并确保没有进行中的主程序升级或恢复任务。
+
+在原服务器终端复制执行。它只更新后台组件并热更新页面，**不重启 CLIProxyAPI 主服务**；会短暂停用并恢复插件自身的更新触发器。失败时停止，不自动改成重启安装；源码目录保留供核查，不批量删除历史目录。
+
+```bash
+(
+  set -euo pipefail
+  SOURCE="$(mktemp -d "$HOME/cliproxy-updater-backups.XXXXXXXX")"
+  printf '源码与失败排查目录：%s\n' "$SOURCE"
+  git clone --no-checkout https://github.com/flying864/cliproxyapi-web-updater.git "$SOURCE/source"
+  cd "$SOURCE/source"
+  git checkout --detach 543b2c96cf061e9fe9bfd8900c987c19c244f552
+  test "$(git rev-parse HEAD)" = 543b2c96cf061e9fe9bfd8900c987c19c244f552
+  python3 -B test_plugin.py
+  sudo bash install.sh --worker-only
+  sudo bash install.sh --hot-reload
+  sudo systemctl is-active cliproxyapi.service
+)
+```
+
+成功后刷新管理中心 → 插件栏 → **CPA 一键更新**，展开 **备份管理** 并主动扫描。检查可显示列表和保护原因；不要为了验收而删除备份。只有勾选并确认后才执行删除。
+
+- 最近完整成功备份、恢复事务使用的材料和未登记历史备份不能删除。
+- 若提示“备份后台需要更新”，确认上面的 `--worker-only` 成功，不要只反复刷新页面。
+- 若提示“旧 hot 事务已恢复并验证”，这次仅恢复旧插件；在终端保留的源码目录重跑 `sudo bash install.sh --hot-reload`，看到“hot-reload 已验证”后才算页面更新完成。
+- 本功能不自动清理、不删除旧 `.so`、配置、OAuth 或其他插件；完整规则见 [备份容量与保留](OPERATIONS.md#备份容量与保留)。
+
+验收证据：[真实权限/安装器/双架构](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/43351812281) · [官方宿主热安装/恢复](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/43351817539)。服务管理部分为隔离测试边界，不代表生产 systemd 全程验收。
+
+## 仅更新页面：热更新，不重启主服务
 
 适用于已通过本仓库安装并初始化的插件，且后台组件兼容 `protocol=1`。已在官方 CLIProxyAPI **v8.0.56 / Ubuntu 24.04 amd64** 上验证。热更新只替换页面插件，保留 Worker、配置和账号数据；不满足条件会停止，**不会自动改成重启安装**。
 
@@ -11,7 +42,7 @@
 ```bash
 python3 -c '
 import hashlib, sys, urllib.request
-commit = "c87889e8c837b81a21c62b399a99f23f61c11621"
+commit = "543b2c96cf061e9fe9bfd8900c987c19c244f552"
 url = "https://raw.githubusercontent.com/flying864/cliproxyapi-web-updater/" + commit + "/scripts/update_plugin.py"
 with urllib.request.urlopen(url, timeout=30) as response:
     code = response.read(65537)
