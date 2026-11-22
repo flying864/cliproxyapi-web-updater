@@ -141,22 +141,37 @@ PYVERIFY
 
     def test_failure_hook_ignores_backups_and_preserves_update_recovery(self):
         fixtures,mocks=build_fixtures()
-        for request,expected in [('backups',0),('cleanup '+'a'*32+' '+'b'*32,0),('update v8.0.56',1)]:
+        for request,expected in [('backups',0),('cleanup '+'a'*32+' '+'b'*32,0),('check',0),('update v8.0.56',1)]:
             with self.subTest(request=request),tempfile.TemporaryDirectory(dir=SCRATCH) as d:
                 sim=Path(d);(sim/'input').write_text(request)
                 script=SETUP.split('bash /source/cliproxy-updater-worker --consume')[0]+r'''
 rm /run/cliproxy-updater/inbox/request
 cp /sim/input /run/cliproxy-updater/processing
 chmod 0400 /run/cliproxy-updater/processing
-printf broken > /var/lib/cliproxy-updater/transaction.json
-chmod 0600 /var/lib/cliproxy-updater/transaction.json
+printf '{"protocol":1,"state":"success","detail":"preserved"}' > /var/lib/cliproxy-updater-status/status.json
+'''
+                if request == 'check':
+                    script += "printf '{\"protocol\":1,\"state\":\"checking\",\"detail\":\"stuck\"}' > /var/lib/cliproxy-updater-status/status.json\n"
+                else:
+                    script += "printf broken > /var/lib/cliproxy-updater/transaction.json\nchmod 0600 /var/lib/cliproxy-updater/transaction.json\n"
+                script += r'''
 bash /source/cliproxy-updater-worker --recover-update-failure > /sim/hook.log 2>&1
 printf '%s' "$?" > /sim/rc
+[[ ! -e /run/cliproxy-updater/processing ]] || touch /sim/processing-left
+cp /var/lib/cliproxy-updater-status/status.json /sim/after-status.json
+if [[ -e /var/lib/cliproxy-updater-status/backups.json ]]; then cp /var/lib/cliproxy-updater-status/backups.json /sim/backups.json; fi
 '''
                 result=subprocess.run(sandbox_args(fixtures,mocks)+['--bind',str(sim),'/sim','--setenv','CASE','backup','/bin/bash','-c',script],capture_output=True,text=True,timeout=20)
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual(int((sim/'rc').read_text()),expected,(sim/'hook.log').read_text())
                 self.assertFalse((sim/'systemctl.log').exists())
+                self.assertFalse((sim/'processing-left').exists(),(sim/'hook.log').read_text())
+                after=json.loads((sim/'after-status.json').read_text())
+                if request == 'check':
+                    self.assertEqual(after['state'],'interrupted')
+                elif expected == 0:
+                    self.assertEqual(after['state'],'success')
+                    self.assertEqual(json.loads((sim/'backups.json').read_text())['state'],'error')
 
     def test_invalid_cleanup_requests_never_reach_helper(self):
         for request in [b'cleanup ../x y',('cleanup '+'a'*32+' '+'b'*32+','+'b'*32).encode(),('cleanup '+'a'*32+' '+','.join(f'{i:032x}' for i in range(21))).encode(),b'backups\x00',b'backups\n']:

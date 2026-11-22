@@ -130,7 +130,7 @@ class Regression(unittest.TestCase):
     def test_metadata(self):
         m = self.invoke('plugin.register')['result']['metadata']
         self.assertEqual(m['GitHubRepository'], 'https://github.com/flying864/cliproxyapi-web-updater')
-        self.assertEqual(m['Version'], '0.5.0')
+        self.assertEqual(m['Version'], '0.5.1')
         self.assertEqual(self.p.abi_version, 1)
 
     def test_setup_gate(self):
@@ -142,6 +142,8 @@ class Regression(unittest.TestCase):
             self.assertEqual(json.loads(self.http()[1])['state'], 'needs_setup')
             for action in ('check', 'update'):
                 self.assertEqual(self.http(action, 'POST')[0], 503)
+        self.ready('{"protocol":1,"state":"ready","latest":"v8.0.56","pending":false}')
+        self.assertEqual(json.loads(self.http()[1])['state'], 'needs_setup')
 
     def test_full_routes(self):
         self.ready()

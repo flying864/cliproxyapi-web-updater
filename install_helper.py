@@ -968,11 +968,14 @@ def run(installing, worker_only=False, hot_reload=False):
                             p.unlink(missing_ok=True)
                     if PUBLIC.exists():
                         atomic_write(PUBLIC / 'status.json', json.dumps(dict(protocol=0, state='setup_required', detail='更新服务已卸载')).encode(), 0o640)
-                        os.chown(PUBLIC / 'status.json', 0, grp.getgrnam('cliproxy').gr_gid)
+                        os.chown(PUBLIC / 'status.json', 0, grp.getgrnam('cliproxy').gr_gid, follow_symlinks=False)
                 ctl('daemon-reload')
                 if not worker_only:
                     ctl('restart', 'cliproxyapi.service')
                 health(api, None if worker_only else installing)
+                if not installing:
+                    (PUBLIC / 'backups.json').unlink(missing_ok=True)
+                    (STATE / 'backup-preview.json').unlink(missing_ok=True)
                 if installing:
                     ctl('enable', 'cliproxy-updater-recover.service')
                     for u in TRIGGERS:
@@ -995,7 +998,7 @@ def run(installing, worker_only=False, hot_reload=False):
                             else:
                                 atomic_write(p, *old)
                                 if p == PUBLIC / 'status.json':
-                                    os.chown(p, 0, grp.getgrnam('cliproxy').gr_gid)
+                                    os.chown(p, 0, grp.getgrnam('cliproxy').gr_gid, follow_symlinks=False)
                         except Exception:
                             failures.append('文件恢复失败: ' + str(p))
                     # Restore service independently: a dead API must not prevent

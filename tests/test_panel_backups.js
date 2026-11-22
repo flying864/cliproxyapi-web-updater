@@ -35,7 +35,7 @@ await tick();await reply(ready);
 nodes['backup-scan'].onclick();await reply({});await tick();await reply({...preview,page:0,page_count:2,total_count:102,truncated:true});
 assert.equal(nodes['backup-next'].disabled,false);nodes['backup-next'].onclick();assert.match(calls.at(-1).url,/backups\?page=1$/);await reply({});await tick();await reply({...preview,token:'e'.repeat(32),page:1,page_count:2});
 assert.equal(nodes['backup-prev'].disabled,false);assert.equal(nodes['backup-next'].disabled,true);assert.equal(nodes['backup-list'].children[0].children[0].checked,false);
-const expiring=nodes['backup-list'].children[0].children[0];expiring.checked=true;expiring.onchange();clock+=600001;nodes['backup-delete'].onclick();assert.equal(pending.length,0);assert.match(nodes['backup-state'].textContent,/过期/);assert.equal(nodes['backup-delete'].disabled,true);
+const expiring=nodes['backup-list'].children[0].children[0];expiring.checked=true;expiring.onchange();clock+=600001;nodes['backup-delete'].onclick();assert.equal(pending.length,0);assert.match(nodes['backup-state'].textContent,/过期/);assert.equal(nodes['backup-delete'].disabled,true);assert.equal(expiring.checked,false);assert.equal(expiring.disabled,true);assert.equal(nodes['backup-total'].textContent,'已选择 0 组 · 0 字节');
 await tick();await reply(ready);
 // A backup action shares the existing in-flight GET gate with upgrades.
 await tick();const before=calls.length;nodes['backup-scan'].onclick();nodes.check.onclick();assert.equal(calls.length,before);await reply(ready);assert.equal(calls.length,before+1);assert.match(calls.at(-1).url,/\/backups$/);await reply({});await tick();

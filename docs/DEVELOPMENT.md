@@ -7,7 +7,7 @@
 需要 Python 3、gcc；前端测试另需 Node.js。Node 不是生产运行依赖。
 
 ```bash
-python3 -B scripts/check_release_version.py --tag v0.5.0
+python3 -B scripts/check_release_version.py --tag v0.5.1
 python3 -B test_plugin.py
 node tests/test_panel.js
 node tests/test_panel_auth.js

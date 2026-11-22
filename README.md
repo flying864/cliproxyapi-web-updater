@@ -1,4 +1,4 @@
-# CPA Web Updater v0.5.0
+# CPA Web Updater v0.5.1
 
 面向自用 Ubuntu/systemd 部署，从本 GitHub 仓库直接安装，不提供插件商店发布流程。
 

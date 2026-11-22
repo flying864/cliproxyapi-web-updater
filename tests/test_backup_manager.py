@@ -94,6 +94,8 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(result['state'], 'success')
         self.assertFalse(old.exists())
         self.assertTrue(latest.exists())
+        saved_registry = json.loads((self.state / 'backup-registry.json').read_text())
+        self.assertEqual(list(saved_registry), ['runtime/' + latest.name])
         with self.assertRaises(ValueError):
             runtime.backup_cleanup(preview['token'], [chosen['id']])
     def eligible(self, count=3, kind='runtime'):

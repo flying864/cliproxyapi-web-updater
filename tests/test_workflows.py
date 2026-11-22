@@ -79,6 +79,7 @@ class WorkflowContract(unittest.TestCase):
                     self.assertRegex(uses, r'^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$')
         for name in ('verify-core.yml', 'build-native.yml'):
             self.assertIn('timeout-minutes:', self.text(name))
+        self.assertIn('- cpa-updater.c', self.text('hot-reload-probe.yml'))
 
 
 if __name__ == '__main__':

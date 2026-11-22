@@ -403,6 +403,14 @@ def backup_cleanup(token, ids):
                 deleted.append(record['id'])
             except (ValueError, OSError):
                 failed.append(record['id'])
+        if deleted:
+            removed = set(deleted)
+            for key in [k for k, item in registry.items() if item['id'] in removed]:
+                del registry[key]
+            try:
+                _backup_write(state, 'backup-registry.json', registry)
+            except OSError:
+                pass
         result.update(state='error' if failed else 'success',
                       detail='已删除 %d 组；失败 %d 组。请重新扫描核对；失败组可能部分删除。' % (len(deleted), len(failed)),
                       deleted_ids=deleted, failed_ids=failed)
@@ -425,7 +433,7 @@ STATE = '/var/lib/cliproxy-updater'
 SERVICE = 'cliproxyapi.service'
 MAX_BYTES = 512 * 1024 * 1024
 MAX_FILES = 10000
-WORKER_VERSION = '0.5.0'
+WORKER_VERSION = '0.5.1'
 
 
 def validate_exec(value):
@@ -610,6 +618,8 @@ def snapshot(output):
             if account.pw_uid == 0:
                 raise ValueError('Refuse root cliproxy identity')
             os.setgroups([]); os.setgid(account.pw_gid); os.setuid(account.pw_uid)
+            if (os.getuid(), os.geteuid(), os.getgid(), os.getegid()) != (account.pw_uid, account.pw_uid, account.pw_gid, account.pw_gid):
+                raise ValueError('Privilege drop verification failed')
             with os.fdopen(write, 'wb') as stream, tarfile.open(fileobj=stream, mode='w|gz') as archive:
                 archive_sources(archive, [('config.yaml', CONFIG), ('auth-dir', auth), ('plugins', APP + '/plugins')])
             os._exit(0)

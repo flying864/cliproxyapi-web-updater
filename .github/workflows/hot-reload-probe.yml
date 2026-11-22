@@ -8,6 +8,7 @@ on:
       - tests/test_hot_reload.py
       - tests/test_hot_install_official.py
       - install_helper.py
+      - cpa-updater.c
 permissions:
   contents: read
 jobs:
