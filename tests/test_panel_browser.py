@@ -286,6 +286,13 @@ class PanelBrowser(unittest.TestCase):
                   document.body.appendChild(bar);
                 }""")
                 frame = self.page.frames[1]
+                toolbar = self.page.locator('#host-toolbar').bounding_box()
+                if width >= 800:
+                    for selector in ['.header-copy', '.header-badge']:
+                        box = frame.locator(selector).bounding_box()
+                        header_overlap = (box['x'] < toolbar['x'] + toolbar['width'] and box['x'] + box['width'] > toolbar['x'] and
+                                          box['y'] < toolbar['y'] + toolbar['height'] and box['y'] + box['height'] > toolbar['y'])
+                        self.assertFalse(header_overlap, selector + ' must not intersect host toolbar')
                 link = frame.locator('a.docs')
                 link.scroll_into_view_if_needed()
                 a = link.bounding_box(); b = self.page.locator('#host-toolbar').bounding_box()
