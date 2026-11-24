@@ -1,6 +1,6 @@
 # 更新插件
 
-更新 **CPA Web Updater 插件及配套后台**，不升级 CLIProxyAPI 主程序。以下命令固定到已通过 GitHub 验收的源码提交 `60f236d79c38fc62775457576b9adcf04921e58f`。
+更新 **CPA Web Updater 插件及配套后台**，不升级 CLIProxyAPI 主程序。以下命令固定到已通过 GitHub 验收的源码提交 `4d0132914b356e29321d869d9e229819563170db`。
 
 ## 本次备份管理与 v0.5.1 更新：后台 + 页面
 
@@ -15,8 +15,8 @@
   printf '源码与失败排查目录：%s\n' "$SOURCE"
   git clone --no-checkout https://github.com/flying864/cliproxyapi-web-updater.git "$SOURCE/source"
   cd "$SOURCE/source"
-  git checkout --detach 60f236d79c38fc62775457576b9adcf04921e58f
-  test "$(git rev-parse HEAD)" = 60f236d79c38fc62775457576b9adcf04921e58f
+  git checkout --detach 4d0132914b356e29321d869d9e229819563170db
+  test "$(git rev-parse HEAD)" = 4d0132914b356e29321d869d9e229819563170db
   python3 -B test_plugin.py
   sudo bash install.sh --worker-only
   sudo bash install.sh --hot-reload
@@ -31,7 +31,7 @@
 - 若提示“旧 hot 事务已恢复并验证”，这次仅恢复旧插件；在终端保留的源码目录重跑 `sudo bash install.sh --hot-reload`，看到“hot-reload 已验证”后才算页面更新完成。
 - 本功能不自动清理、不删除旧 `.so`、配置、OAuth 或其他插件；完整规则见 [备份容量与保留](OPERATIONS.md#备份容量与保留)。
 
-验收证据：[真实权限/安装器/双架构](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/44985200260) · [官方宿主热安装/恢复](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/44985200294)。服务管理部分为隔离测试边界，不代表生产 systemd 全程验收。
+验收证据：[真实权限/安装器/双架构](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/45387296115) · [官方宿主热安装/恢复](https://github.com/flying864/cliproxyapi-web-updater/actions/runs/45387296033)。服务管理部分为隔离测试边界，不代表生产 systemd 全程验收。
 
 ## 仅更新页面：热更新，不重启主服务
 
@@ -42,7 +42,7 @@
 ```bash
 python3 -c '
 import hashlib, sys, urllib.request
-commit = "60f236d79c38fc62775457576b9adcf04921e58f"
+commit = "4d0132914b356e29321d869d9e229819563170db"
 url = "https://raw.githubusercontent.com/flying864/cliproxyapi-web-updater/" + commit + "/scripts/update_plugin.py"
 with urllib.request.urlopen(url, timeout=30) as response:
     code = response.read(65537)
