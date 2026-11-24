@@ -50,7 +50,7 @@ await tick();await reply({...ready,state:'current'});assert.equal(nodes.check.di
 await tick();await reply({...ready,state:'needs_recheck'});assert.equal(nodes.check.disabled,false);
 await tick();await reply(ready);nodes.update.onclick();nodes.check.onclick();nodes.update.onclick();assert.equal(calls.filter(x=>x.options.method==='POST').length,2);assert.match(calls.at(-1).url,/update\?version=v8.0.56$/);
 await reply({});await tick();await reply({...ready,latest:'https://evil.test/<script>'});assert.ok(nodes.release.hidden);
-for(const c of calls){assert.equal(c.options.credentials,'omit');assert.equal(c.options.headers.Authorization,'Bearer secret')}
+for(const c of calls){assert.equal(c.options.credentials,'same-origin');assert.equal(c.options.headers.Authorization,'Bearer secret')}
 // A queued update is bound to the version confirmed at click time, not the next poll.
 await tick();await reply(ready);await tick();
 let confirmation='';context.confirm=message=>{confirmation=message;return true};
@@ -124,6 +124,12 @@ nodes.check.onclick();count=posts();nodes.key.oninput();nodes.key.onchange();
 assert.ok(nodes.check.disabled);assert.equal(posts(),count);
 nodes.key.value='post-replacement';await reply({});
 assert.equal(posts(),count);assert.equal(calls.at(-1).options.method,'GET');await reply(ready);
-for(const c of calls)assert.equal(c.options.credentials,'omit');
+// Non-JSON gateway errors (e.g. Cloudflare WAF 403 or SSO 200 HTML) surface clearly instead of masking as disconnect.
+await tick();pending.shift().resolve({ok:false,status:403,json:async()=>{throw new SyntaxError('<html>')}});await flush();
+assert.match(nodes.connection.textContent,/^HTTP 403：/);assert.doesNotMatch(nodes.connection.textContent,/重连/);
+await tick();pending.shift().resolve({ok:true,status:200,json:async()=>{throw new SyntaxError('<html>')}});await flush();
+assert.match(nodes.connection.textContent,/非 JSON/);assert.doesNotMatch(nodes.connection.textContent,/重连/);
+await tick();await reply(ready);
+for(const c of calls)assert.equal(c.options.credentials,'same-origin');
 console.log('panel vm: silent autofill, key isolation, polling stability, queued actions, no POST replay PASS');
 })().catch(e=>{console.error(e);process.exitCode=1});
